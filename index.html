@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#fff6f8" />
+  <title>Mochi Studio — Squishy Artwork & Motion Physics</title>
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Header & 3-Step Workflow -->
+    <header class="top-header">
+      <div class="brand-row">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <h1>Mochi Studio</h1>
+        </div>
+        <button id="btnTheme" class="icon-circle" title="Switch Light / Dark Theme" aria-label="Switch Theme">
+          <svg id="iconMoon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg id="iconSun" class="hidden" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        </button>
+      </div>
+
+      <nav class="step-tabs" role="tablist" aria-label="Workflow steps">
+        <button class="step-tab" data-step="image" role="tab" aria-selected="false">
+          <span class="step-num">1</span>
+          <span>Add</span>
+        </button>
+        <button class="step-tab" data-step="paint" role="tab" aria-selected="false">
+          <span class="step-num">2</span>
+          <span>Paint</span>
+        </button>
+        <button class="step-tab active" data-step="play" role="tab" aria-selected="true">
+          <span class="step-num">3</span>
+          <span>Play</span>
+        </button>
+      </nav>
+    </header>
+
+    <!-- Main Interactive Dotted Stage -->
+    <main class="stage-wrap" id="stageWrap">
+      <!-- WebGL2 Artwork Canvas -->
+      <canvas id="glCanvas" class="stage-canvas"></canvas>
+      <!-- 2D Overlay Canvas (Paint Mask, Brush Cursor, Multi-Touch Dots) -->
+      <canvas id="overlayCanvas" class="stage-canvas overlay-canvas"></canvas>
+
+      <!-- Top Floating Paint Hint Pill (Paint Mode only) -->
+      <div id="paintHint" class="paint-hint hidden">
+        Paint where you want it squishy (two fingers to zoom / move)
+      </div>
+
+      <!-- Top-Right Floating Reset View Pill -->
+      <button id="btnResetView" class="reset-view-pill" title="Reset Zoom & Position">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+        <span>Reset view</span>
+      </button>
+
+      <!-- Floating Motion Sensor HUD Pill (Play Mode when Motion / Virtual Pad active) -->
+      <div id="motionHud" class="motion-hud hidden">
+        <div class="tilt-radar" aria-hidden="true">
+          <div id="tiltDot" class="tilt-dot"></div>
+        </div>
+        <span id="motionHudText">Sensors ON</span>
+        <button id="btnCalibrate" class="hud-mini-btn" title="Set current tilt as neutral">Zero</button>
+        <button id="btnHudJiggle" class="hud-mini-btn" title="Trigger a hands-free jiggle">Jiggle</button>
+      </div>
+
+      <!-- Recording Status Pill -->
+      <div id="recBadge" class="rec-badge hidden">
+        <span class="rec-dot"></span>
+        <span id="recTimer">00:00</span>
+      </div>
+
+      <!-- Top-Center Toast Banner (matches clean dark pill style) -->
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+      <!-- Step 1: Add Image Card Overlay -->
+      <section id="panelImage" class="add-overlay hidden" aria-label="Add Artwork">
+        <div class="add-card" id="dropzone">
+          <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+          <div class="cloud-ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 16l-4-4-4 4"/>
+              <path d="M12 12v9"/>
+              <path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>
+            </svg>
+          </div>
+          <h2>Drop an image here</h2>
+          <p class="add-sub">You can also pick a file or paste (Ctrl+V)</p>
+
+          <div class="add-cta-row">
+            <label for="fileInput" class="pill-btn primary">Choose image</label>
+            <button id="btnTrySample" class="pill-btn outline">Try a sample</button>
+          </div>
+
+          <div class="samples-strip-label">Or pick a built-in mochi</div>
+          <div class="samples-strip" id="samplesGrid">
+            <button class="sample-chip active" data-sample="bear">
+              <div class="sample-thumb" id="thumb-bear"></div>
+              <span>Bear</span>
+            </button>
+            <button class="sample-chip" data-sample="cat">
+              <div class="sample-thumb" id="thumb-cat"></div>
+              <span>Cat</span>
+            </button>
+            <button class="sample-chip" data-sample="pudding">
+              <div class="sample-thumb" id="thumb-pudding"></div>
+              <span>Flan</span>
+            </button>
+            <button class="sample-chip" data-sample="bunny">
+              <div class="sample-thumb" id="thumb-bunny"></div>
+              <span>Bunny</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Virtual Tilt Pad (Optional hands-free testing on desktop / non-HTTPS) -->
+      <section id="virtualPad" class="virtual-pad hidden" aria-label="Virtual Motion Pad">
+        <div class="vpad-head">
+          <span>Virtual Tilt & Shake</span>
+          <button id="btnCloseVpad" class="vpad-close" aria-label="Close Virtual Pad">✕</button>
+        </div>
+        <div class="vpad-arena" id="vpadArena">
+          <div class="vpad-cross-h"></div>
+          <div class="vpad-cross-v"></div>
+          <div class="vpad-knob" id="vpadKnob"></div>
+        </div>
+        <div class="vpad-actions">
+          <button id="btnVpadShake" class="vpad-shake-btn">Jiggle</button>
+          <label class="vpad-hold">
+            <input type="checkbox" id="chkVpadHold" /> Hold
+          </label>
+        </div>
+      </section>
+
+      <!-- Floating Bottom Dock (Inside Stage for Clean Card Aesthetic) -->
+      <div class="dock-container">
+        <!-- Paint Mode Floating Card Dock -->
+        <div id="dockPaint" class="paint-card hidden">
+          <div class="paint-row-top">
+            <button id="toolBrush" class="tool-box active" title="Brush">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+              <span>Brush</span>
+            </button>
+            <button id="toolEraser" class="tool-box" title="Eraser">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8l9.9-9.9c.8-.8 2-.8 2.8 0l5.6 5.6c.8.8.8 2 0 2.8L13 20"/><path d="M6 11l7 7"/></svg>
+              <span>Eraser</span>
+            </button>
+
+            <div class="seg-toggle" role="group" aria-label="Brush edge">
+              <button id="edgeSharp" class="seg-btn active" data-edge="sharp">Sharp</button>
+              <button id="edgeSoft" class="seg-btn" data-edge="soft">Soft</button>
+            </div>
+
+            <div class="undo-pair">
+              <button id="btnUndo" class="mini-ico-btn" title="Undo" disabled aria-label="Undo">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>
+              </button>
+              <button id="btnRedo" class="mini-ico-btn" title="Redo" disabled aria-label="Redo">
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="paint-row-mid">
+            <div class="size-slider-col">
+              <span class="size-label">Size</span>
+              <input type="range" id="brushSize" min="10" max="76" value="30" />
+            </div>
+
+            <button id="btnClearMask" class="clear-box" title="Clear all painted areas">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+              <span>Clear all</span>
+            </button>
+
+            <button id="btnAllSquishy" class="pill-btn outline small-pill">All squishy</button>
+          </div>
+
+          <div class="paint-row-bot">
+            <button id="btnDonePaint" class="pill-btn primary play-cta">Play!</button>
+          </div>
+        </div>
+
+        <!-- Play Mode Clean Floating Pill Dock -->
+        <div id="dockPlay" class="play-dock">
+          <button id="btnPlayImage" class="play-btn" title="Choose or upload image">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            <span>Image</span>
+          </button>
+
+          <button id="btnPlayPaint" class="play-btn" title="Repaint squishy zones">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+            <span>Repaint</span>
+          </button>
+
+          <button id="btnSensors" class="play-btn" title="Toggle Phone Motion Sensors">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="12" y1="18" x2="12.01" y2="18"/><path d="M2 9c.8-1.5 1.5-2 2-2"/><path d="M22 9c-.8-1.5-1.5-2-2-2"/></svg>
+            <span id="btnSensorsLabel">Motion</span>
+          </button>
+
+          <button id="btnSound" class="play-btn" title="Toggle Squish Sound">
+            <svg id="svgSoundOff" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+            <svg id="svgSoundOn" class="hidden" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+            <span>Sound</span>
+          </button>
+
+          <button id="btnRecord" class="play-btn" title="Record Video or GIF">
+            <span class="rec-circle-ico" id="recCircleIco"></span>
+            <span id="recLabel">Record</span>
+          </button>
+
+          <button id="btnSettings" class="play-btn" title="Squishiness, Motion & Record Settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="2" y1="14" x2="6" y2="14"/><line x1="10" y1="8" x2="14" y2="8"/><line x1="18" y1="16" x2="22" y2="16"/></svg>
+            <span>Settings</span>
+          </button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Settings Bottom Sheet (Clean Pastel Design) -->
+    <div id="settingsBackdrop" class="sheet-backdrop hidden"></div>
+    <aside id="settingsSheet" class="settings-sheet hidden" aria-label="Settings">
+      <div class="sheet-header">
+        <h3>Settings</h3>
+        <button id="btnCloseSettings" class="sheet-close" aria-label="Close Settings">✕</button>
+      </div>
+
+      <div class="sheet-body">
+        <!-- Squishiness -->
+        <div class="sheet-section">
+          <div class="section-title">Squishiness</div>
+
+          <div class="row-slider">
+            <label for="optSoftness">Softness</label>
+            <input type="range" id="optSoftness" min="10" max="100" value="58" />
+          </div>
+
+          <button id="btnFineTune" class="finetune-toggle" aria-expanded="false">
+            <span id="fineTuneArrow">▸</span> Fine-tune
+          </button>
+
+          <div id="fineTuneBox" class="finetune-box hidden">
+            <div class="preset-pills">
+              <button class="preset-pill active" data-preset="real">Real Mochi</button>
+              <button class="preset-pill" data-preset="daifuku">Soft Daifuku</button>
+              <button class="preset-pill" data-preset="firm">Firm Dough</button>
+            </div>
+
+            <div class="row-slider">
+              <label for="optStretch">Stretch</label>
+              <input type="range" id="optStretch" min="15" max="100" value="66" />
+            </div>
+
+            <div class="row-slider">
+              <label for="optBounce">Bounce</label>
+              <input type="range" id="optBounce" min="0" max="85" value="36" />
+            </div>
+
+            <div class="row-slider">
+              <label for="optGrab">Touch radius</label>
+              <input type="range" id="optGrab" min="15" max="100" value="52" />
+            </div>
+
+            <label class="toggle-row">
+              <span>Soft 3D squish shading</span>
+              <input type="checkbox" id="optShading" />
+            </label>
+          </div>
+
+          <button id="btnResetPhysics" class="pill-btn outline small-pill">Back to default</button>
+        </div>
+
+        <!-- Motion Sensors (Unique Hands-Free Feature) -->
+        <div class="sheet-section">
+          <div class="section-title">Motion Sensors</div>
+          <div class="row-slider">
+            <label for="optMotion">Sensitivity</label>
+            <input type="range" id="optMotion" min="10" max="100" value="60" />
+          </div>
+          <div class="motion-sheet-row">
+            <label class="toggle-row inline-toggle">
+              <span>Virtual Tilt Pad</span>
+              <input type="checkbox" id="optVpad" />
+            </label>
+            <button id="btnTestJiggle" class="pill-btn outline small-pill">Jiggle</button>
+          </div>
+        </div>
+
+        <!-- Sound -->
+        <div class="sheet-section">
+          <div class="section-title">Sound</div>
+          <div class="row-slider">
+            <label for="optVolume">Volume</label>
+            <input type="range" id="optVolume" min="0" max="100" value="55" />
+          </div>
+        </div>
+
+        <!-- Record -->
+        <div class="sheet-section">
+          <div class="section-title">Record</div>
+          <div class="seg-toggle record-seg" role="group" aria-label="Record format">
+            <button id="recModeVideo" class="seg-btn active" data-rec="video">Video</button>
+            <button id="recModeGif" class="seg-btn" data-rec="gif">GIF</button>
+          </div>
+
+          <!-- Video Engine FPS Options -->
+          <div id="recVideoOpts" class="record-subbox">
+            <div class="sub-label">Engine FPS (direct capture)</div>
+            <div class="fps-pills" id="videoFpsPills">
+              <button class="fps-pill active" data-fps="60">60</button>
+              <button class="fps-pill" data-fps="90">90</button>
+              <button class="fps-pill" data-fps="120">120</button>
+              <button class="fps-pill" data-fps="custom">Custom</button>
+            </div>
+            <div id="customFpsRow" class="custom-fps-row hidden">
+              <input type="range" id="optCustomFps" min="15" max="240" value="144" />
+              <div class="fps-num-wrap">
+                <input type="number" id="numCustomFps" min="15" max="240" value="144" aria-label="Custom FPS" />
+                <span>FPS</span>
+              </div>
+            </div>
+            <p class="section-note">Pulls frames directly from the physics &amp; WebGL2 engine (independent of screen Hz).</p>
+          </div>
+
+          <!-- GIF Optional High-FPS Options -->
+          <div id="recGifOpts" class="record-subbox hidden">
+            <label class="toggle-row">
+              <span>High-FPS GIF (up to 60)</span>
+              <input type="checkbox" id="optGifHighFps" />
+            </label>
+            <div id="gifFpsRow" class="gif-fps-box hidden">
+              <div class="fps-pills" id="gifFpsPills">
+                <button class="fps-pill" data-gfps="24">24</button>
+                <button class="fps-pill active" data-gfps="30">30</button>
+                <button class="fps-pill" data-gfps="50">50</button>
+                <button class="fps-pill" data-gfps="60">60</button>
+              </div>
+              <div class="custom-fps-row">
+                <input type="range" id="optGifFps" min="15" max="60" value="30" />
+                <span class="fps-val-pill" id="valGifFps">30 FPS</span>
+              </div>
+            </div>
+            <p class="section-note" id="gifRecordNote">Lightweight 15 FPS GIF (up to 6 seconds).</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
