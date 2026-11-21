@@ -471,6 +471,21 @@ html, body {
   font-size: 12.5px;
 }
 
+/* Settings → source code link */
+.source-link {
+  gap: 7px;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.source-link:hover {
+  background: var(--soft-pink);
+}
+
+.source-link svg {
+  flex: 0 0 auto;
+}
+
 /* ---------- Virtual Tilt Pad ---------- */
 .virtual-pad {
   position: absolute;
