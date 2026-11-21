@@ -1,6 +1,6 @@
 {
   "name": "mochi-studio",
-  "version": "13.0.0",
+  "version": "14.0.0",
   "description": "Viscoelastic Continuum Squishy Artwork Studio with Optional Phone Motion Sensors",
   "scripts": {
     "start": "node server.js 25565",

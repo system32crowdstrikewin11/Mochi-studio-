@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v13 — Main Application Controller
+ * Mochi Studio v14 — Main Application Controller
  * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint mode AND Play mode!
  * - Zero-chaos Viscoelastic Navier-Cauchy Mochi Physics
  * - Clipboard Ctrl+V image paste + Drag & Drop + 4 Built-in Samples

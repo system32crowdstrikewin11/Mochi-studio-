@@ -1,61 +1,66 @@
 /**
- * MochiPhysicsContinuum v13 — Full Fine-Tune Adaptive Yield-Stress Mochi Engine (44x44)
+ * MochiPhysicsContinuum v14 — Calm, Dense, Cushioned Viscoelastic Mochi Engine (44x44)
  *
- * Exposes all signature fine-tune physical dimensions with CFL-proven stability
- * across 45–240 FPS and every slider combination:
- * - Softness:       Master softness & plushness
- * - Grab area:      Touch cushion footprint (sigmaBase & sigmaGrow)
- * - Stretch:        How far & freely cheeks/ears stretch
- * - Wobble speed:   Natural oscillation frequency (slow dreamy -> fast snappy)
- * - Wobbles:        Number & duration of rebounds (overdamped dough -> long jiggly pudding)
- * - Puffiness:      Poisson volume conservation & plump outward bulge when squished
- * - Yield firmness: Tautness on slight touches vs. chewy yield on extreme pulls
+ * Engine refinements fixing over-reactivity & eye/cheek smearing:
+ * 1. Cushioned Elastic Tether + Viscoelastic Finger Low-Pass (tau ~ 26ms):
+ *    - Replaces rigid plier-like grabbing with a soft, pillowy tether (kGrab balanced
+ *      against cohesive kLap & kHome) so fast circular face scrubs glide smoothly
+ *      like chilled, dense mochi instead of whipping or smearing facial features.
+ * 2. Restrained Default Stretch Envelope + Adaptive Yield-Stress S-Curve:
+ *    - Default Real Mochi stays calm, plump, and proportional even on huge far pulls
+ *      above the head or around the face (matching authentic mochi restraint), while
+ *      cranking Softness/Stretch up (or choosing Soft Daifuku) unlocks big stretchy pulls.
+ * 3. Higher Cohesion-to-Grab Ratio + Soft Ground Shadow Anchoring:
+ *    - Eyes gently squint/tilt instead of shearing into streaks, and transparent
+ *      characters stay softly grounded at their base shadow.
+ * 4. Full Fine-Tune Controls (Softness, Grab area, Stretch, Wobble speed, Wobbles,
+ *    Puffiness, Yield firmness) — CFL-verified across 45–240 FPS!
  */
 
 export const PRESETS = {
   real: {
     name: 'Real Mochi',
-    softness: 58,
+    softness: 50,
     grab: 52,
-    stretch: 66,
-    wobbleSpeed: 55,
-    wobbles: 45,
-    puffiness: 55,
-    yieldFirmness: 55,
-    motion: 60,
+    stretch: 50,
+    wobbleSpeed: 52,
+    wobbles: 42,
+    puffiness: 52,
+    yieldFirmness: 60,
+    motion: 55,
   },
   daifuku: {
     name: 'Soft Daifuku',
-    softness: 84,
-    grab: 64,
-    stretch: 86,
-    wobbleSpeed: 48,
-    wobbles: 58,
-    puffiness: 74,
-    yieldFirmness: 38,
-    motion: 75,
+    softness: 82,
+    grab: 62,
+    stretch: 82,
+    wobbleSpeed: 46,
+    wobbles: 56,
+    puffiness: 72,
+    yieldFirmness: 36,
+    motion: 72,
   },
   flan: {
     name: 'Jiggly Flan',
-    softness: 74,
-    grab: 58,
-    stretch: 72,
-    wobbleSpeed: 64,
-    wobbles: 88,
-    puffiness: 78,
-    yieldFirmness: 25,
-    motion: 82,
+    softness: 72,
+    grab: 56,
+    stretch: 68,
+    wobbleSpeed: 62,
+    wobbles: 86,
+    puffiness: 76,
+    yieldFirmness: 28,
+    motion: 80,
   },
   firm: {
     name: 'Firm Dough',
-    softness: 28,
-    grab: 42,
-    stretch: 44,
+    softness: 26,
+    grab: 44,
+    stretch: 36,
     wobbleSpeed: 50,
     wobbles: 14,
     puffiness: 32,
-    yieldFirmness: 78,
-    motion: 40,
+    yieldFirmness: 80,
+    motion: 38,
   },
 };
 
@@ -179,20 +184,30 @@ export class MochiPhysicsContinuum {
     this.hasTransparency = transparentVerts > this.V * 0.06;
   }
 
-  /** Whole-image squishy mode (used automatically when nothing was painted!) */
+  /**
+   * Whole-image squishy mode (used automatically when nothing was painted!).
+   * Keeps the entire body plump & squishy while softly grounding the very bottom
+   * shadow rim on transparent artworks so it doesn't detach awkwardly on upward pulls.
+   */
   setWholeImageSquishy() {
     const N = this.N;
     const borderFeather = this.hasTransparency ? 0.032 : 0.06;
     for (let j = 0; j < N; j++) {
       const v = j / (N - 1);
       const dyEdge = Math.min(v, 1 - v);
+      // Soft ground-shadow feather in bottom 16% of transparent characters
+      let bottomGround = 1.0;
+      if (this.hasTransparency && v > 0.76) {
+        const t = Math.min(1, (v - 0.76) / 0.18);
+        bottomGround = 1.0 - t * 0.58; // smoothly eases down to 0.42 at shadow floor
+      }
       for (let i = 0; i < N; i++) {
         const u = i / (N - 1);
         const dxEdge = Math.min(u, 1 - u);
         const dEdge = Math.min(dxEdge, dyEdge);
         const k = j * N + i;
         let weight = Math.min(1, dEdge / borderFeather);
-        weight = weight * weight * (3 - 2 * weight);
+        weight = weight * weight * (3 - 2 * weight) * bottomGround;
         this.w[k] = weight;
         if (weight === 0) {
           this.ux[k] = 0; this.uy[k] = 0;
@@ -298,9 +313,9 @@ export class MochiPhysicsContinuum {
     const restX = this.x0[bestK];
     const restY = this.y0[bestK];
 
-    // Whisper-light tactile tap feedback (scales gently with softness)
-    const pokeR2 = 0.075 * 0.075;
-    const pokeAmp = 0.035 + (this.params.softness / 100) * 0.04;
+    // Ultra-subtle tactile touchdown cue (no twitchy jolt!)
+    const pokeR2 = 0.08 * 0.08;
+    const pokeAmp = 0.012 + (this.params.softness / 100) * 0.016;
     for (let k = 0; k < this.V; k++) {
       const wk = this.w[k];
       if (wk <= 0.01) continue;
@@ -317,13 +332,15 @@ export class MochiPhysicsContinuum {
       originY: wy,
       currX: wx,
       currY: wy,
+      smoothX: wx,
+      smoothY: wy,
       anchorX: restX,
       anchorY: restY,
       baseUx: this.ux[bestK],
       baseUy: this.uy[bestK],
       effDx: 0,
       effDy: 0,
-      sigma: 0.075,
+      sigma: 0.085,
     });
     return true;
   }
@@ -341,8 +358,8 @@ export class MochiPhysicsContinuum {
 
   setMotionForce(gx, gy, ax = 0, ay = 0) {
     const sens = this.params.motion / 100;
-    const scaleG = 12.0 + sens * 24.0;
-    const scaleA = 18.0 + sens * 38.0;
+    const scaleG = 8.0 + sens * 18.0;
+    const scaleA = 12.0 + sens * 26.0;
     this.gravityX = gx * scaleG;
     this.gravityY = gy * scaleG;
     this.shakeX += ax * scaleA;
@@ -351,39 +368,46 @@ export class MochiPhysicsContinuum {
 
   triggerJiggle(strength = 1.0) {
     const dir = Math.random() < 0.5 ? 1 : -1;
-    const imp = (1.05 + (this.params.softness / 100) * 0.78) * strength;
+    const imp = (0.82 + (this.params.softness / 100) * 0.62) * strength;
     for (let i = 0; i < this.V; i++) {
       const wi = this.w[i];
       if (wi <= 0) continue;
       const wave = 0.78 + 0.22 * Math.sin(this.y0[i] * 5.0);
       this.vx[i] += dir * imp * wi * wave;
-      this.vy[i] += 0.45 * imp * wi * wave;
+      this.vy[i] += 0.36 * imp * wi * wave;
     }
   }
 
   /**
-   * Build the Adaptive Yield-Stress S-Curve + Soft-Norm + Affine Pinch Corridor finger field.
-   * Respects Grab area, Stretch, Softness, Puffiness, and Yield firmness!
+   * Build the Cushioned Adaptive Yield-Stress + Soft-Norm + Affine Pinch Corridor finger field.
+   * Smoothly filters raw pointer jumps (tau = 26ms) so rapid circular scrubs feel dense & buttery!
    */
-  _buildFingerField(soft, grab, str, puff, firm) {
+  _buildFingerField(dt, soft, grab, str, puff, firm) {
     const V = this.V;
     const list = Array.from(this.handles.values());
     if (list.length === 0) return false;
 
-    // Adaptive Yield-Stress S-Curve controlled by Yield firmness, Softness, and Stretch:
-    const gFirm = Math.min(0.78, 0.22 + (1.0 - firm) * 0.36 + soft * 0.16);
-    const gStretch = Math.max(gFirm + 0.12, 0.65 + str * 0.38);
-    const dYield = Math.max(0.06, 0.10 + firm * 0.075 - soft * 0.03);
-    const maxStretch = 0.16 + str * 0.20;
+    // Smooth viscoelastic contact lag (~26ms) kills harsh flick spikes while feeling instant!
+    const fingerEase = 1.0 - Math.exp(-dt / 0.026);
 
-    // Adaptive touch radius controlled by Grab area (and subtly broadened by Puffiness!)
-    const sigmaBase = 0.044 + grab * 0.052 + puff * 0.010;
-    const sigmaGrow = 0.028 + grab * 0.032;
+    // Restrained, realistic mochi transfer curve:
+    // Calm & subtle on slight/medium scrubs; smoothly yields on committed big stretches!
+    const gFirm = Math.min(0.56, 0.15 + (1.0 - firm) * 0.23 + soft * 0.13);
+    const gStretch = Math.max(gFirm + 0.10, 0.36 + str * 0.34 + soft * 0.12);
+    const dYield = Math.max(0.08, 0.115 + firm * 0.085 - soft * 0.025);
+    const maxStretch = 0.095 + str * 0.120 + soft * 0.045;
+
+    // Smooth, rounded fingertip cushion radius
+    const sigmaBase = 0.056 + grab * 0.054 + puff * 0.008;
+    const sigmaGrow = 0.022 + grab * 0.026;
 
     for (let i = 0; i < list.length; i++) {
       const h = list[i];
-      const rawDx = h.baseUx + (h.currX - h.originX);
-      const rawDy = h.baseUy + (h.currY - h.originY);
+      h.smoothX += (h.currX - h.smoothX) * fingerEase;
+      h.smoothY += (h.currY - h.smoothY) * fingerEase;
+
+      const rawDx = h.baseUx + (h.smoothX - h.originX);
+      const rawDy = h.baseUy + (h.smoothY - h.originY);
       const mag = Math.hypot(rawDx, rawDy);
       if (mag > 1e-6) {
         const r = mag / dYield;
@@ -402,7 +426,7 @@ export class MochiPhysicsContinuum {
       }
     }
 
-    // Gentle non-crossing cushion for approaching pairs (allows ~70% inward cheek pinch >w<!)
+    // Gentle non-crossing cushion for approaching pairs
     if (list.length >= 2) {
       for (let a = 0; a < list.length; a++) {
         for (let b = a + 1; b < list.length; b++) {
@@ -412,7 +436,7 @@ export class MochiPhysicsContinuum {
           const restDist = Math.hypot(rdx, rdy);
           if (restDist < 0.02) continue;
 
-          const minSep = Math.min(0.105, restDist * 0.30);
+          const minSep = Math.min(0.11, restDist * 0.34);
           const ax = ha.anchorX + ha.effDx, ay = ha.anchorY + ha.effDy;
           const bx = hb.anchorX + hb.effDx, by = hb.anchorY + hb.effDy;
           const cdx = bx - ax, cdy = by - ay;
@@ -484,9 +508,9 @@ export class MochiPhysicsContinuum {
       }
     }
 
-    // Affine Pinch Corridor for approaching pairs -> fold-free >w< pinch + plump Puffiness bulge!
+    // Affine Pinch Corridor for approaching pairs -> fold-free >w< pinch + plump Puffiness bulge
     if (list.length >= 2) {
-      const puffBulge = puff * 0.28; // Perpendicular mochi puff when squeezing cheeks together!
+      const puffBulge = puff * 0.28;
       for (let a = 0; a < list.length; a++) {
         for (let b = a + 1; b < list.length; b++) {
           const ha = list[a], hb = list[b];
@@ -505,9 +529,8 @@ export class MochiPhysicsContinuum {
           const inv2CorrSig2 = 1.0 / (2 * corrSig * corrSig);
           const maxPerp2 = (corrSig * 3.2) * (corrSig * 3.2);
           const invRdist = 1.0 / rdist;
-          // Perpendicular unit vector (-ny, nx)
           const px = -ny, py = nx;
-          const squishAmt = Math.min(0.22, relApp);
+          const squishAmt = Math.min(0.20, relApp);
 
           for (let k = 0; k < V; k++) {
             if (w[k] <= 0.01) continue;
@@ -523,7 +546,6 @@ export class MochiPhysicsContinuum {
             if (c < 0.01) continue;
 
             const tClamped = proj <= 0 ? 0 : (proj >= rdist ? 1 : proj * invRdist);
-            // Smooth plump perpendicular puff outward from pinch centerline!
             const bulgeMag = puffBulge * squishAmt * (perp / (corrSig + Math.abs(perp)));
             const linX = (1.0 - tClamped) * ha.effDx + tClamped * hb.effDx + px * bulgeMag;
             const linY = (1.0 - tClamped) * ha.effDy + tClamped * hb.effDy + py * bulgeMag;
@@ -558,22 +580,24 @@ export class MochiPhysicsContinuum {
     const freqMul = 0.45 + spd * 1.20;
     const omegaScale = Math.sqrt(freqMul);
 
-    // CFL-verified viscoelastic constants across ALL slider & FPS combinations!
-    const kLap = (1380.0 - soft * 620.0) * freqMul;
-    const kBulk = (90.0 + puff * 680.0) * (1.10 - soft * 0.35) * freqMul;
-    const kHome = (430.0 - soft * 240.0) * freqMul;
-    const gamma = (24.0 - wob * 20.2) * omegaScale;
-    const betaViscBase = 0.28 - wob * 0.15;
+    // Calm, dense, cohesive continuum constants (high kLap/kGrab ratio -> zero eye smearing!)
+    const kLap = (1580.0 - soft * 560.0) * freqMul;
+    const kBulk = (110.0 + puff * 640.0) * (1.08 - soft * 0.30) * freqMul;
+    const kHome = (490.0 - soft * 245.0) * freqMul;
+    const gamma = (24.5 - wob * 19.8) * omegaScale;
+    const betaViscBase = 0.30 - wob * 0.14;
     const betaVisc = Math.min(0.42, betaViscBase * (h * 300.0));
-    const kGrab = (1500.0 + str * 720.0) * (0.75 + 0.35 * freqMul);
-    const cGrab = 48.0 * omegaScale;
 
-    // Nonlinear Bingham yield softening (modulated by Yield firmness!)
-    const yieldFloor = 1.0 - (0.20 + firm * 0.30); // firm=0 -> 0.80, firm=0.55 -> 0.635, firm=1 -> 0.50
+    // Soft cushioned finger tether (replaces over-reactive 2250 plier spring!)
+    const kGrab = (460.0 + str * 560.0 + soft * 210.0) * (0.72 + 0.32 * freqMul);
+    const cGrab = 38.0 * omegaScale;
+
+    // Restrained Bingham yield floor so shape memory stays grounded
+    const yieldFloor = 1.0 - (0.14 + firm * 0.24);
     const yieldSpan = 1.0 - yieldFloor;
     const invYieldU2 = 1.0 / (0.085 * 0.085);
 
-    const hasFingers = this._buildFingerField(soft, grab, str, puff, firm);
+    const hasFingers = this._buildFingerField(dt, soft, grab, str, puff, firm);
     const damp = Math.exp(-gamma * h);
 
     const N = this.N;

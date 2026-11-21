@@ -1,4 +1,4 @@
-# Mochi Studio v13
+# Mochi Studio v14
 
 Interactive squishy artwork studio built with **HTML5**, **CSS3**, **GLSL ES 3.00 (WebGL2)**, **ES Modules JavaScript**, **WebCodecs + Pure-JS WebM Muxer**, and **Web Audio API**.
 
