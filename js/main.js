@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v12 — Main Application Controller
+ * Mochi Studio v13 — Main Application Controller
  * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint mode AND Play mode!
  * - Zero-chaos Viscoelastic Navier-Cauchy Mochi Physics
  * - Clipboard Ctrl+V image paste + Drag & Drop + 4 Built-in Samples
@@ -739,9 +739,12 @@ function refreshAllSliderFills() {
 function syncSlidersFromPhysics() {
   const p = physics.params;
   $('optSoftness').value = p.softness;
-  $('optStretch').value = p.stretch;
-  $('optBounce').value = p.bounce;
   $('optGrab').value = p.grab;
+  $('optStretch').value = p.stretch;
+  $('optWobbleSpeed').value = p.wobbleSpeed;
+  $('optWobbles').value = p.wobbles;
+  $('optPuffiness').value = p.puffiness;
+  $('optFirmness').value = p.yieldFirmness;
   $('optMotion').value = p.motion;
   refreshAllSliderFills();
 }
@@ -904,10 +907,20 @@ function wireUI() {
     });
   };
   bindRange('optSoftness', 'softness');
-  bindRange('optStretch', 'stretch');
-  bindRange('optBounce', 'bounce');
   bindRange('optGrab', 'grab');
+  bindRange('optStretch', 'stretch');
+  bindRange('optWobbleSpeed', 'wobbleSpeed');
+  bindRange('optWobbles', 'wobbles');
+  bindRange('optPuffiness', 'puffiness');
+  bindRange('optFirmness', 'yieldFirmness');
   bindRange('optMotion', 'motion');
+
+  $('optMotionTilt').addEventListener('change', (e) => {
+    motion.tiltEnabled = e.target.checked;
+  });
+  $('optMotionShake').addEventListener('change', (e) => {
+    motion.shakeEnabled = e.target.checked;
+  });
 
   $('optShading').addEventListener('change', (e) => {
     renderer.shadingEnabled = e.target.checked;

@@ -7,6 +7,8 @@ export class MotionSensorManager {
   constructor() {
     this.enabled = false;
     this.virtualEnabled = false;
+    this.tiltEnabled = true;
+    this.shakeEnabled = true;
 
     this.baseBeta = 35;
     this.baseGamma = 0;
@@ -147,10 +149,11 @@ export class MotionSensorManager {
   }
 
   getCombinedForce() {
-    const gx = (this.enabled ? this.tiltX : 0) + (this.virtualEnabled ? this.vTiltX : 0);
-    const gy = (this.enabled ? this.tiltY : 0) + (this.virtualEnabled ? this.vTiltY : 0);
-    const ix = this.impulseX;
-    const iy = this.impulseY;
+    const useTilt = this.tiltEnabled;
+    const gx = ((this.enabled && useTilt) ? this.tiltX : 0) + (this.virtualEnabled ? this.vTiltX : 0);
+    const gy = ((this.enabled && useTilt) ? this.tiltY : 0) + (this.virtualEnabled ? this.vTiltY : 0);
+    const ix = this.shakeEnabled ? this.impulseX : 0;
+    const iy = this.shakeEnabled ? this.impulseY : 0;
     this.impulseX = 0;
     this.impulseY = 0;
     return {

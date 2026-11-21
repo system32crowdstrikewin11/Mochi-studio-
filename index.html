@@ -255,10 +255,16 @@
           </button>
 
           <div id="fineTuneBox" class="finetune-box hidden">
-            <div class="preset-pills">
+            <div class="preset-pills preset-grid-4">
               <button class="preset-pill active" data-preset="real">Real Mochi</button>
               <button class="preset-pill" data-preset="daifuku">Soft Daifuku</button>
+              <button class="preset-pill" data-preset="flan">Jiggly Flan</button>
               <button class="preset-pill" data-preset="firm">Firm Dough</button>
+            </div>
+
+            <div class="row-slider">
+              <label for="optGrab">Grab area</label>
+              <input type="range" id="optGrab" min="15" max="100" value="52" />
             </div>
 
             <div class="row-slider">
@@ -267,13 +273,23 @@
             </div>
 
             <div class="row-slider">
-              <label for="optBounce">Bounce</label>
-              <input type="range" id="optBounce" min="0" max="85" value="36" />
+              <label for="optWobbleSpeed">Wobble speed</label>
+              <input type="range" id="optWobbleSpeed" min="15" max="100" value="55" />
             </div>
 
             <div class="row-slider">
-              <label for="optGrab">Touch radius</label>
-              <input type="range" id="optGrab" min="15" max="100" value="52" />
+              <label for="optWobbles">Wobbles</label>
+              <input type="range" id="optWobbles" min="0" max="95" value="45" />
+            </div>
+
+            <div class="row-slider">
+              <label for="optPuffiness">Puffiness</label>
+              <input type="range" id="optPuffiness" min="0" max="100" value="55" />
+            </div>
+
+            <div class="row-slider">
+              <label for="optFirmness">Yield firmness</label>
+              <input type="range" id="optFirmness" min="0" max="100" value="55" />
             </div>
 
             <label class="toggle-row">
@@ -291,6 +307,16 @@
           <div class="row-slider">
             <label for="optMotion">Sensitivity</label>
             <input type="range" id="optMotion" min="10" max="100" value="60" />
+          </div>
+          <div class="motion-toggles-pair">
+            <label class="toggle-row inline-toggle">
+              <span>Tilt gravity</span>
+              <input type="checkbox" id="optMotionTilt" checked />
+            </label>
+            <label class="toggle-row inline-toggle">
+              <span>Shake jiggle</span>
+              <input type="checkbox" id="optMotionShake" checked />
+            </label>
           </div>
           <div class="motion-sheet-row">
             <label class="toggle-row inline-toggle">

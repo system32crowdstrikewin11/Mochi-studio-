@@ -1,5 +1,5 @@
 /* =========================================================
-   Mochi Studio v12 — Clean Pastel Polka-Dot & Dark Studio CSS3
+   Mochi Studio v13 — Clean Pastel Polka-Dot & Dark Studio CSS3
    ========================================================= */
 
 :root {
@@ -879,7 +879,7 @@ input[type="range"]::-webkit-slider-thumb {
 .row-slider {
   width: 100%;
   display: grid;
-  grid-template-columns: 92px 1fr;
+  grid-template-columns: 112px 1fr;
   align-items: center;
   gap: 12px;
   font-size: 14.5px;
@@ -1072,6 +1072,19 @@ input[type="range"]::-webkit-slider-thumb {
   flex-direction: column;
   gap: 10px;
   width: 100%;
+}
+
+.preset-grid-4 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.motion-toggles-pair {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .hidden { display: none !important; }
