@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v14 — Main Application Controller
+ * Mochi Studio v15 — Main Application Controller
  * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint mode AND Play mode!
  * - Zero-chaos Viscoelastic Navier-Cauchy Mochi Physics
  * - Clipboard Ctrl+V image paste + Drag & Drop + 4 Built-in Samples
@@ -354,8 +354,9 @@ function handlePointerEnd(e) {
 
   if (state.step === 'play') {
     if (rec && rec.role === 'grab') {
+      const pullMag = physics.getHandlePullIntensity(e.pointerId);
       physics.pointerUp(e.pointerId);
-      audio.playPuni(Math.min(1, 0.35 + physics.peakStrain * 0.65), false);
+      audio.playPuni(Math.min(1, pullMag * 0.85 + physics.peakStrain * 0.25), false);
     }
     if (getPinchPointers().length < 2) {
       state.pinchState = null;
