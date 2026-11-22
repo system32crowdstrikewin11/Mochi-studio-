@@ -1,5 +1,5 @@
 /* =========================================================
-   Mochi Studio v20 — Clean Pastel Polka-Dot & Dark Studio CSS3
+   Mochi Studio v21 — Clean Pastel Polka-Dot & Dark Studio CSS3
    ========================================================= */
 
 :root {
@@ -1439,6 +1439,29 @@ input[type="range"].brush-size-slider::-moz-range-thumb {
     width: 138px;
     bottom: 84px;
   }
+}
+
+
+/* Full-Viewport Air Cursor Overlay & UI Hover Highlight */
+.air-cursor-canvas {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  pointer-events: none;
+  z-index: 90;
+}
+
+.air-hover {
+  outline: 2.5px solid var(--accent-strong) !important;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px rgba(255, 79, 134, 0.20) !important;
+}
+
+.campip-ico.active {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: #fff;
 }
 
 .hidden { display: none !important; }

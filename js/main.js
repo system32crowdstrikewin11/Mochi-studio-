@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v20 — Main Application Controller
+ * Mochi Studio v21 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
  * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
@@ -13,14 +13,15 @@ import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js?v=20';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=20';
-import { BrushEngine } from './brush-engine.js?v=20';
-import { MotionSensorManager } from './motion-sensors.js?v=20';
-import { CameraHandTracker } from './camera-tracker.js?v=20';
-import { SquishAudio } from './audio-squish.js?v=20';
-import { EngineRecorder } from './engine-recorder.js?v=20';
-import { getSample } from './samples.js?v=20';
+} from './physics-continuum.js?v=21';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=21';
+import { BrushEngine } from './brush-engine.js?v=21';
+import { MotionSensorManager } from './motion-sensors.js?v=21';
+import { CameraHandTracker } from './camera-tracker.js?v=21';
+import { AirCursorController } from './air-cursor.js?v=21';
+import { SquishAudio } from './audio-squish.js?v=21';
+import { EngineRecorder } from './engine-recorder.js?v=21';
+import { getSample } from './samples.js?v=21';
 
 const $ = (id) => document.getElementById(id);
 const IMAGE_MAX_SIDE = 2048;
@@ -64,6 +65,50 @@ const motion = new MotionSensorManager();
 const camera = new CameraHandTracker();
 const audio = new SquishAudio();
 const recorder = new EngineRecorder();
+
+const airCursor = new AirCursorController($('airCursorCanvas'), {
+  getStep: () => state.step,
+  glCanvas,
+  onPlayGrabStart: (slot, clientX, clientY) => {
+    const iso = renderer.isoFromClient(clientX, clientY);
+    const g = physics.tryGrab(9000 + slot, iso.x, iso.y);
+    if (g) {
+      audio.playGrab();
+      state.needsRender = true;
+      return true;
+    }
+    return false;
+  },
+  onPlayGrabMove: (slot, clientX, clientY) => {
+    const iso = renderer.isoFromClient(clientX, clientY);
+    physics.move(9000 + slot, iso.x, iso.y);
+    state.needsRender = true;
+  },
+  onPlayGrabEnd: (slot) => {
+    const g = physics.release(9000 + slot);
+    if (g) {
+      audio.playRelease(physics.intensityOf(g), physics.params.releaseFreq);
+      state.needsRender = true;
+    }
+  },
+  onPaintHover: (clientX, clientY) => {
+    if (!state.gestureActive) moveBrushCursor(clientX, clientY);
+  },
+  onPaintStart: (clientX, clientY) => {
+    if (!brushPreviewEl.classList.contains('hidden')) hideBrushPreview();
+    brush.beginStroke();
+    moveBrushCursor(clientX, clientY);
+    paintAt(clientX, clientY);
+  },
+  onPaintMove: (clientX, clientY) => {
+    moveBrushCursor(clientX, clientY);
+    paintAt(clientX, clientY);
+  },
+  onPaintEnd: () => {
+    brush.endStroke();
+    state.needsRender = true;
+  },
+});
 
 physics.maskSample = brush.sampleBlurred;
 
@@ -230,7 +275,8 @@ function setStep(nextStep) {
   brushPreviewEl.classList.add('hidden');
   state.needsRender = true;
 
-  camera.paused = nextStep !== 'play';
+  camera.paused = !(camera.airCursorEnabled || nextStep === 'play');
+  camera.allowWaveBounce = nextStep === 'play';
   updateCameraUI();
 
   if (nextStep === 'paint') {
@@ -508,8 +554,7 @@ glCanvas.addEventListener('wheel', (e) => {
 let overlayHasDrawn = false;
 function renderOverlay() {
   const showMouseDots = state.step === 'play' && state.activeTouches.size > 0;
-  const showHandDots = state.step === 'play' && camera.enabled && !camera.paused && camera.handCursors.length > 0;
-  if (!showMouseDots && !showHandDots && !overlayHasDrawn) return;
+  if (!showMouseDots && !overlayHasDrawn) return;
 
   const w = renderer.cssWidth;
   const h = renderer.cssHeight;
@@ -542,23 +587,6 @@ function renderOverlay() {
     }
   }
 
-  if (showHandDots) {
-    for (let i = 0; i < camera.handCursors.length; i++) {
-      const hc = camera.handCursors[i];
-      const x = hc.x * w;
-      const y = hc.y * h;
-      overlayCtx.save();
-      overlayCtx.beginPath();
-      overlayCtx.arc(x, y, hc.pinching ? 15 : 11, 0, Math.PI * 2);
-      overlayCtx.fillStyle = hc.pinching ? 'rgba(255, 79, 134, 0.28)' : 'rgba(242, 132, 164, 0.12)';
-      overlayCtx.fill();
-      overlayCtx.lineWidth = hc.pinching ? 2.4 : 1.6;
-      overlayCtx.strokeStyle = hc.pinching ? '#ff4f86' : 'rgba(242, 132, 164, 0.70)';
-      overlayCtx.stroke();
-      overlayCtx.restore();
-      overlayHasDrawn = true;
-    }
-  }
 }
 
 // ============================================================================
@@ -571,6 +599,20 @@ function tick(now) {
   // Smooth Reset View animation
   if (renderer.stepViewAnimation()) {
     afterViewChange();
+  }
+
+  // Run camera hand tracking + full-viewport Air Cursor across ALL steps (Add / Paint / Play / Settings)!
+  if (camera.enabled && !camera.paused) {
+    const previewCanvas = camera.showPreview ? $('camPreviewCanvas') : null;
+    camera.update(now, previewCanvas);
+    const badgeText = (now - camera.lastGestureTime < 900 && camera.lastGestureTime > 0)
+      ? camera.lastGestureText
+      : (camera.airCursorEnabled && camera.activeEngine === 'ai' ? 'Pinch / Wave' : 'Wave hand');
+    const badgeEl = $('camDirBadge');
+    if (badgeEl.textContent !== badgeText) badgeEl.textContent = badgeText;
+    airCursor.update(now, camera.handCursors);
+  } else {
+    airCursor.resetAll();
   }
 
   // Upload mask texture whenever dirty (unblurred in Paint mode, blurred in Play mode)
@@ -586,16 +628,6 @@ function tick(now) {
       state.needsRender = false;
     }
   } else if (state.step === 'play') {
-    if (camera.enabled && !camera.paused) {
-      const previewCanvas = camera.showPreview ? $('camPreviewCanvas') : null;
-      camera.update(now, previewCanvas);
-      const badgeText = (now - camera.lastGestureTime < 900 && camera.lastGestureTime > 0)
-        ? camera.lastGestureText
-        : 'Wave hand';
-      const badgeEl = $('camDirBadge');
-      if (badgeEl.textContent !== badgeText) badgeEl.textContent = badgeText;
-    }
-
     const mf = motion.getCombinedForce();
     const cf = camera.enabled && !camera.paused ? camera.consumeForce() : { gx: 0, gy: 0, ax: 0, ay: 0 };
     const gx = Math.max(-1.4, Math.min(1.4, mf.gx + cf.gx));
@@ -979,13 +1011,17 @@ function updateMotionHud() {
 
 function updateCameraUI() {
   const on = camera.enabled;
-  const showPip = on && camera.showPreview && state.step === 'play';
+  const showPip = on && camera.showPreview && (camera.airCursorEnabled || state.step === 'play');
+  airCursor.enabled = on && camera.airCursorEnabled && camera.activeEngine === 'ai';
+  if (!airCursor.enabled) airCursor.resetAll();
+
   $('btnCamera').classList.toggle('active', on);
   $('btnCameraLabel').textContent = on ? 'Cam ON' : 'Camera';
   $('optCamera').checked = on;
   $('optCamPreview').checked = camera.showPreview;
   $('optCamMirror').checked = camera.mirror;
-  $('optCamPinch').checked = camera.pinchGrabEnabled;
+  $('optCamCursor').checked = camera.airCursorEnabled;
+  $('btnCamCursor').classList.toggle('active', camera.airCursorEnabled);
   $('camEngineAI').classList.toggle('active', camera.preferredEngine === 'ai');
   $('camEngineFlow').classList.toggle('active', camera.preferredEngine === 'flow');
   $('camEngineBadge').textContent = camera.getEngineBadge();
@@ -994,9 +1030,11 @@ function updateCameraUI() {
 
 async function toggleCameraFlow() {
   const res = await camera.toggle();
-  camera.paused = state.step !== 'play';
+  camera.paused = !(camera.airCursorEnabled || state.step === 'play');
+  camera.allowWaveBounce = state.step === 'play';
+  if (!camera.enabled) airCursor.resetAll();
   updateCameraUI();
-  if (res.message) showToast(res.message, 3000);
+  if (res.message) showToast(res.message, 3200);
 }
 
 function updateSoundUI() {
@@ -1117,6 +1155,7 @@ function wireUI() {
   }
   window.addEventListener('resize', () => {
     if (renderer.resize()) afterViewChange();
+    airCursor.resize();
   });
 
   wireGlobalFileInputs();
@@ -1253,42 +1292,22 @@ function wireUI() {
   $('optCamBounce').addEventListener('change', (e) => {
     camera.bounceEnabled = e.target.checked;
   });
-  $('optCamPinch').addEventListener('change', (e) => {
-    camera.pinchGrabEnabled = e.target.checked;
+  const setAirCursorEnabled = (on) => {
+    camera.airCursorEnabled = Boolean(on);
+    if (camera.airCursorEnabled && camera.preferredEngine !== 'ai') {
+      camera.setPreferredEngine('ai');
+    }
+    camera.paused = !(camera.airCursorEnabled || state.step === 'play');
     updateCameraUI();
-  });
+    showToast(camera.airCursorEnabled ? 'Air Cursor ON — pinch to click, drag sliders, or pull cheeks!' : 'Air Cursor OFF (wave bounce only)', 2400);
+  };
+  $('optCamCursor').addEventListener('change', (e) => setAirCursorEnabled(e.target.checked));
+  $('btnCamCursor').addEventListener('click', () => setAirCursorEnabled(!camera.airCursorEnabled));
+
   $('optCamFollow').addEventListener('change', (e) => {
     camera.followEnabled = e.target.checked;
     if (!camera.followEnabled) state.needsRender = true;
   });
-
-  // Mid-Air Pinch Grab callbacks (maps camera hand pinch directly into 1:1 mochi cheek grabs!)
-  const camNormToIso = (nx, ny) => {
-    const rect = glCanvas.getBoundingClientRect();
-    return renderer.isoFromClient(rect.left + nx * rect.width, rect.top + ny * rect.height);
-  };
-  camera.onPinchStart = (slot, nx, ny) => {
-    if (state.step !== 'play') return;
-    const iso = camNormToIso(nx, ny);
-    const g = physics.tryGrab(9000 + slot, iso.x, iso.y);
-    if (g) {
-      audio.playGrab();
-      state.needsRender = true;
-    }
-  };
-  camera.onPinchMove = (slot, nx, ny) => {
-    if (state.step !== 'play') return;
-    const iso = camNormToIso(nx, ny);
-    physics.move(9000 + slot, iso.x, iso.y);
-    state.needsRender = true;
-  };
-  camera.onPinchEnd = (slot) => {
-    const g = physics.release(9000 + slot);
-    if (g) {
-      audio.playRelease(physics.intensityOf(g), physics.params.releaseFreq);
-      state.needsRender = true;
-    }
-  };
   camera.onEngineChange = (_eng, msg) => {
     updateCameraUI();
     if (msg) showToast(msg, 2800);

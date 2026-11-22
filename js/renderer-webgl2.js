@@ -1,5 +1,5 @@
 /**
- * MochiRendererWebGL2 v20 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
+ * MochiRendererWebGL2 v21 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
  *
  * - Dense 128..192 segment WebGL2 mesh with GPU analytic quintic-falloff physics,
  *   ring bulge, 4-tap mask smoothing, depth-lift, bicubic zoom sampling, and Paint mask view
@@ -122,8 +122,8 @@ export class MochiRendererWebGL2 {
   async init() {
     try {
       const [vRes, fRes] = await Promise.all([
-        fetch('./shaders/mochi.vert.glsl?v=20'),
-        fetch('./shaders/mochi.frag.glsl?v=20'),
+        fetch('./shaders/mochi.vert.glsl?v=21'),
+        fetch('./shaders/mochi.frag.glsl?v=21'),
       ]);
       if (vRes.ok && fRes.ok) {
         this.vertSrc = await vRes.text();

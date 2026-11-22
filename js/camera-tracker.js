@@ -1,5 +1,5 @@
 /**
- * CameraHandTracker v20 — Ultra-Smooth, Granular Dual-Engine Real-Time Hand Tracking
+ * CameraHandTracker v21 — Ultra-Smooth, Granular Dual-Engine Real-Time Hand Tracking
  *
  * Engine 1 (AI Hands — Default, auto-loads lazily when Camera turns on):
  *   - MediaPipe 21-Landmark HandLandmarker (@mediapipe/tasks-vision, GPU w/ CPU fallback)
@@ -176,7 +176,8 @@ export class CameraHandTracker {
     this.mirror = true;
     this.showPreview = true;
     this.bounceEnabled = true;
-    this.pinchGrabEnabled = true;
+    this.airCursorEnabled = true;
+    this.allowWaveBounce = true;
     this.followEnabled = false;
     this.sensitivity = 68;    // 20 .. 100
     this.smoothness = 55;     // 0 .. 100 (tunes 1-Euro filter live!)
@@ -239,6 +240,8 @@ export class CameraHandTracker {
       pinchX: 0.5,
       pinchY: 0.5,
       pinching: false,
+      pinchProgress: 0,
+      releaseGraceUntil: 0,
       vx: 0,
       vy: 0,
       landmarks: null,
@@ -385,6 +388,8 @@ export class CameraHandTracker {
       h.present = false;
       h.hasPrevPalm = false;
       h.pinching = false;
+      h.pinchProgress = 0;
+      h.releaseGraceUntil = 0;
       h.vx = 0;
       h.vy = 0;
       h.landmarks = null;
@@ -398,6 +403,8 @@ export class CameraHandTracker {
     for (const h of this._hands) {
       if (h.pinching) {
         h.pinching = false;
+      h.pinchProgress = 0;
+      h.releaseGraceUntil = 0;
         if (this.onPinchEnd) this.onPinchEnd(h.slot);
       }
     }
@@ -595,12 +602,21 @@ export class CameraHandTracker {
   // ==========================================================================
   // ENGINE 1: MediaPipe 21-Landmark AI Hand Tracking (Ultra-Granular + Pinch!)
   // ==========================================================================
+  _mapActiveZone(nx, ny) {
+    // Comfortable ergonomic camera box -> full 0..1 viewport reach without stretching arm out of frame
+    const u = (nx - 0.13) / 0.74;
+    const v = (ny - 0.11) / 0.76;
+    return {
+      x: Math.max(0.005, Math.min(0.995, u)),
+      y: Math.max(0.005, Math.min(0.995, v)),
+    };
+  }
+
   _updateAIHands(now, dt) {
     let result = null;
     try {
       result = this._handLandmarker.detectForVideo(this.video, now);
     } catch {
-      // If GPU context hiccups, seamlessly drop back to Sub-pixel LK flow
       this.activeEngine = 'flow';
       this._hasPrevFlow = false;
       this._releaseAllPinches();
@@ -608,9 +624,9 @@ export class CameraHandTracker {
     }
 
     const detected = (result && result.landmarks) ? result.landmarks : [];
-    const sensNorm = this.sensitivity / 100; // 0.20 .. 1.00
+    const sensNorm = this.sensitivity / 100;
 
-    // Match detected hands to existing slots by closest palm distance (prevents left/right ID swap!)
+    // Extract ergonomic stabilized aim point + palm + pinch ratio per detected hand
     const rawHands = detected.map((lms) => {
       const mapX = (x) => (this.mirror ? 1.0 - x : x);
       const palmX = mapX((lms[0].x + lms[5].x + lms[9].x + lms[13].x + lms[17].x) * 0.2);
@@ -619,25 +635,35 @@ export class CameraHandTracker {
       const thumbY = lms[4].y;
       const indexX = mapX(lms[8].x);
       const indexY = lms[8].y;
+      const indexMcpX = mapX(lms[5].x);
+      const indexMcpY = lms[5].y;
       const wristX = mapX(lms[0].x);
       const wristY = lms[0].y;
       const midX = mapX(lms[9].x);
       const midY = lms[9].y;
       const palmSize = Math.max(0.05, Math.hypot(midX - wristX, midY - wristY));
       const pinchRatio = Math.hypot(indexX - thumbX, indexY - thumbY) / palmSize;
+
+      // Anti-drift hybrid aim point: blends fingertip pinch midpoint (65%) with stable index knuckle (35%)
+      const pinchMidX = (thumbX + indexX) * 0.5;
+      const pinchMidY = (thumbY + indexY) * 0.5;
+      const aimRawX = pinchMidX * 0.65 + indexMcpX * 0.35;
+      const aimRawY = pinchMidY * 0.65 + indexMcpY * 0.35;
+      const mappedAim = this._mapActiveZone(aimRawX, aimRawY);
+
       return {
         lms,
         palmX,
         palmY,
-        pinchX: (thumbX + indexX) * 0.5,
-        pinchY: (thumbY + indexY) * 0.5,
+        cursorX: mappedAim.x,
+        cursorY: mappedAim.y,
         pinchRatio,
       };
     });
 
+    // Nearest-neighbor slot assignment so Hand 0 & Hand 1 stay consistent across frames
     const assigned = [null, null];
     if (rawHands.length === 1) {
-      // Pick whichever active slot was closer
       const d0 = this._hands[0].present ? Math.hypot(rawHands[0].palmX - this._hands[0].palmX, rawHands[0].palmY - this._hands[0].palmY) : 0.01;
       const d1 = this._hands[1].present ? Math.hypot(rawHands[0].palmX - this._hands[1].palmX, rawHands[0].palmY - this._hands[1].palmY) : 99;
       assigned[d0 <= d1 ? 0 : 1] = rawHands[0];
@@ -673,11 +699,13 @@ export class CameraHandTracker {
       if (!raw) {
         if (h.pinching) {
           h.pinching = false;
+          h.releaseGraceUntil = now + 240;
           if (this.onPinchEnd) this.onPinchEnd(h.slot);
         }
         h.present = false;
         h.hasPrevPalm = false;
         h.landmarks = null;
+        h.pinchProgress = 0;
         h.vx *= 0.7;
         h.vy *= 0.7;
         continue;
@@ -687,17 +715,30 @@ export class CameraHandTracker {
       h.landmarks = raw.lms;
       presentCount++;
 
+      // Continuous pinch-closeness progress [0..1] (for tactile cursor ring!)
+      const prog = Math.max(0, Math.min(1, (0.68 - raw.pinchRatio) / (0.68 - 0.35)));
+      h.pinchProgress = prog;
+
+      // Pre-pinch stabilization: gently steady cursor while thumb+index are closing together
+      const sNorm = this.smoothness / 100;
+      const baseCut = (4.2 - sNorm * 3.1) * 1.25;
+      const baseBeta = (0.24 - sNorm * 0.17) * 1.3;
+      if (!h.pinching && prog > 0.52) {
+        h.pinchFilter.setParams(Math.max(0.75, baseCut * 0.48), baseBeta * 0.45);
+      } else {
+        h.pinchFilter.setParams(baseCut, baseBeta);
+      }
+
       const fp = h.palmFilter.filter(raw.palmX, raw.palmY, dt);
-      const fPinch = h.pinchFilter.filter(raw.pinchX, raw.pinchY, dt);
+      const fCursor = h.pinchFilter.filter(raw.cursorX, raw.cursorY, dt);
       h.palmX = fp.x;
       h.palmY = fp.y;
-      h.pinchX = fPinch.x;
-      h.pinchY = fPinch.y;
+      h.pinchX = fCursor.x;
+      h.pinchY = fCursor.y;
 
       centSumX += (fp.x * 2 - 1);
       centSumY += (fp.y * 2 - 1);
 
-      // Compute continuous velocity in normalized screen-widths / second
       let rawVx = 0;
       let rawVy = 0;
       if (h.hasPrevPalm) {
@@ -713,18 +754,15 @@ export class CameraHandTracker {
       h.vy = Math.max(-4.0, Math.min(4.0, fv.y));
 
       // Hysteresis pinch detection (thumb tip + index tip)
-      if (this.pinchGrabEnabled) {
+      if (this.airCursorEnabled) {
         const wasPinching = h.pinching;
-        if (!wasPinching && raw.pinchRatio < 0.34) {
+        if (!wasPinching && raw.pinchRatio < 0.35) {
           h.pinching = true;
-          if (this.onPinchStart) this.onPinchStart(h.slot, h.pinchX, h.pinchY);
-          this.lastGestureText = '👌 Pinch!';
+          this.lastGestureText = '👌 Pinch';
           this.lastGestureTime = now;
         } else if (wasPinching && raw.pinchRatio > 0.48) {
           h.pinching = false;
-          if (this.onPinchEnd) this.onPinchEnd(h.slot);
-        } else if (wasPinching) {
-          if (this.onPinchMove) this.onPinchMove(h.slot, h.pinchX, h.pinchY);
+          h.releaseGraceUntil = now + 240;
         }
 
         this.handCursors.push({
@@ -732,23 +770,24 @@ export class CameraHandTracker {
           x: h.pinchX,
           y: h.pinchY,
           pinching: h.pinching,
+          pinchProgress: h.pinchProgress,
         });
       } else if (h.pinching) {
         h.pinching = false;
-        if (this.onPinchEnd) this.onPinchEnd(h.slot);
+        h.releaseGraceUntil = now + 240;
       }
 
       if (h.pinching) {
         anyPinching = true;
-      } else {
+      } else if (now > h.releaseGraceUntil) {
         waveVxSum += h.vx;
         waveVySum += h.vy;
         waveHandCount++;
       }
     }
 
-    // Aggregate open-hand wave velocity into silky continuous 360° bounce forces!
-    if (waveHandCount > 0) {
+    // Only emit wave bounce when allowed (Play mode) and not currently pinching
+    if (this.allowWaveBounce && waveHandCount > 0) {
       const vx = waveVxSum / waveHandCount;
       const vy = waveVySum / waveHandCount;
       this.smoothVx = vx * 0.55;
@@ -968,6 +1007,7 @@ export class CameraHandTracker {
       hasCent = 1;
     }
 
+    if (!this.allowWaveBounce) { this._leadGx *= 0.8; this._leadGy *= 0.8; return false; }
     return this._applyContinuousWavePhysics(vx, vy, dt, now, this.sensitivity / 100, false, hasCent, centX, centY, false);
   }
 
@@ -976,7 +1016,7 @@ export class CameraHandTracker {
   // ==========================================================================
   _applyContinuousWavePhysics(vx, vy, dt, now, sensNorm, isAI, presentCount, centSumX, centSumY, anyPinching) {
     // Micro deadzone preserves tiny granular gestures while staying 100% calm at rest
-    const deadzone = isAI ? (0.10 - sensNorm * 0.05) : (0.14 - sensNorm * 0.06);
+    const deadzone = isAI ? (this.airCursorEnabled ? (0.42 - sensNorm * 0.14) : (0.10 - sensNorm * 0.05)) : (0.14 - sensNorm * 0.06);
     const speed = Math.hypot(vx, vy);
     let active = anyPinching;
 
@@ -1091,7 +1131,7 @@ export class CameraHandTracker {
 
         if (hand.pinching) {
           ctx.beginPath();
-          ctx.arc(hand.pinchX * w, hand.pinchY * h, 7, 0, Math.PI * 2);
+          ctx.arc((mx(lms[4].x) + mx(lms[8].x)) * 0.5, (my(lms[4].y) + my(lms[8].y)) * 0.5, 7, 0, Math.PI * 2);
           ctx.fillStyle = 'rgba(255, 79, 134, 0.45)';
           ctx.fill();
           ctx.strokeStyle = '#fff';
