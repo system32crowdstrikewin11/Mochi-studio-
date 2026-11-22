@@ -18,7 +18,7 @@
   <meta name="twitter:title" content="Mochi Studio — Squishy Artwork & Motion Physics" />
   <meta name="twitter:description" content="Paint squishy zones on any image, then poke, pinch, tilt your phone, and record your own mochi. Runs entirely in your browser — free, no install." />
 
-  <link rel="stylesheet" href="./css/styles.css?v=19" />
+  <link rel="stylesheet" href="./css/styles.css?v=20" />
 </head>
 <body>
   <div class="app-shell">
@@ -160,6 +160,7 @@
         <div class="campip-head">
           <span class="campip-title">
             <span class="campip-dot" aria-hidden="true"></span>
+            <span id="camEngineBadge" class="campip-eng">AI</span>
             <span id="camDirBadge">Wave hand</span>
           </span>
           <div class="campip-btns">
@@ -360,9 +361,17 @@
             <span>Enable camera tracking</span>
             <input type="checkbox" id="optCamera" />
           </label>
+          <div class="seg-toggle record-seg" role="group" aria-label="Hand tracking engine">
+            <button id="camEngineAI" class="seg-btn active" data-eng="ai">AI Hands (21-pt)</button>
+            <button id="camEngineFlow" class="seg-btn" data-eng="flow">Fast Flow</button>
+          </div>
           <div class="row-slider">
             <label for="optCamSens">Sensitivity</label>
-            <input type="range" id="optCamSens" min="20" max="100" value="65" />
+            <input type="range" id="optCamSens" min="20" max="100" value="68" />
+          </div>
+          <div class="row-slider">
+            <label for="optCamSmooth">Smoothness</label>
+            <input type="range" id="optCamSmooth" min="0" max="100" value="55" />
           </div>
           <div class="motion-toggles-pair">
             <label class="toggle-row inline-toggle">
@@ -370,21 +379,25 @@
               <input type="checkbox" id="optCamBounce" checked />
             </label>
             <label class="toggle-row inline-toggle">
-              <span>Follow hand</span>
-              <input type="checkbox" id="optCamFollow" />
+              <span>Air pinch grab</span>
+              <input type="checkbox" id="optCamPinch" checked />
             </label>
           </div>
           <div class="motion-toggles-pair">
             <label class="toggle-row inline-toggle">
+              <span>Follow hand</span>
+              <input type="checkbox" id="optCamFollow" />
+            </label>
+            <label class="toggle-row inline-toggle">
               <span>Show preview</span>
               <input type="checkbox" id="optCamPreview" checked />
             </label>
-            <label class="toggle-row inline-toggle">
-              <span>Mirror view</span>
-              <input type="checkbox" id="optCamMirror" checked />
-            </label>
           </div>
-          <p class="section-note">Wave your hand up, down, left, right, or diagonally in front of the camera to bounce!</p>
+          <label class="toggle-row inline-toggle">
+            <span>Mirror view</span>
+            <input type="checkbox" id="optCamMirror" checked />
+          </label>
+          <p class="section-note">Wave gently or fast in any 360° direction to bounce, or pinch thumb + index in mid-air to pull cheeks!</p>
         </div>
 
         <!-- Sound -->
@@ -484,6 +497,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/main.js?v=19"></script>
+  <script type="module" src="./js/main.js?v=20"></script>
 </body>
 </html>

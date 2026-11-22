@@ -1,5 +1,5 @@
 /* =========================================================
-   Mochi Studio v19 — Clean Pastel Polka-Dot & Dark Studio CSS3
+   Mochi Studio v20 — Clean Pastel Polka-Dot & Dark Studio CSS3
    ========================================================= */
 
 :root {
@@ -1361,6 +1361,17 @@ input[type="range"].brush-size-slider::-moz-range-thumb {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+
+.campip-eng {
+  font-size: 9px;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  flex: 0 0 auto;
 }
 
 .campip-dot {

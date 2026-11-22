@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v19 — Main Application Controller
+ * Mochi Studio v20 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
  * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
@@ -13,14 +13,14 @@ import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js?v=19';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=19';
-import { BrushEngine } from './brush-engine.js?v=19';
-import { MotionSensorManager } from './motion-sensors.js?v=19';
-import { CameraHandTracker } from './camera-tracker.js?v=19';
-import { SquishAudio } from './audio-squish.js?v=19';
-import { EngineRecorder } from './engine-recorder.js?v=19';
-import { getSample } from './samples.js?v=19';
+} from './physics-continuum.js?v=20';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=20';
+import { BrushEngine } from './brush-engine.js?v=20';
+import { MotionSensorManager } from './motion-sensors.js?v=20';
+import { CameraHandTracker } from './camera-tracker.js?v=20';
+import { SquishAudio } from './audio-squish.js?v=20';
+import { EngineRecorder } from './engine-recorder.js?v=20';
+import { getSample } from './samples.js?v=20';
 
 const $ = (id) => document.getElementById(id);
 const IMAGE_MAX_SIDE = 2048;
@@ -508,7 +508,8 @@ glCanvas.addEventListener('wheel', (e) => {
 let overlayHasDrawn = false;
 function renderOverlay() {
   const showMouseDots = state.step === 'play' && state.activeTouches.size > 0;
-  if (!showMouseDots && !overlayHasDrawn) return;
+  const showHandDots = state.step === 'play' && camera.enabled && !camera.paused && camera.handCursors.length > 0;
+  if (!showMouseDots && !showHandDots && !overlayHasDrawn) return;
 
   const w = renderer.cssWidth;
   const h = renderer.cssHeight;
@@ -535,6 +536,24 @@ function renderOverlay() {
       overlayCtx.fill();
       overlayCtx.lineWidth = 1.5;
       overlayCtx.strokeStyle = 'rgba(242, 132, 164, 0.55)';
+      overlayCtx.stroke();
+      overlayCtx.restore();
+      overlayHasDrawn = true;
+    }
+  }
+
+  if (showHandDots) {
+    for (let i = 0; i < camera.handCursors.length; i++) {
+      const hc = camera.handCursors[i];
+      const x = hc.x * w;
+      const y = hc.y * h;
+      overlayCtx.save();
+      overlayCtx.beginPath();
+      overlayCtx.arc(x, y, hc.pinching ? 15 : 11, 0, Math.PI * 2);
+      overlayCtx.fillStyle = hc.pinching ? 'rgba(255, 79, 134, 0.28)' : 'rgba(242, 132, 164, 0.12)';
+      overlayCtx.fill();
+      overlayCtx.lineWidth = hc.pinching ? 2.4 : 1.6;
+      overlayCtx.strokeStyle = hc.pinching ? '#ff4f86' : 'rgba(242, 132, 164, 0.70)';
       overlayCtx.stroke();
       overlayCtx.restore();
       overlayHasDrawn = true;
@@ -966,6 +985,10 @@ function updateCameraUI() {
   $('optCamera').checked = on;
   $('optCamPreview').checked = camera.showPreview;
   $('optCamMirror').checked = camera.mirror;
+  $('optCamPinch').checked = camera.pinchGrabEnabled;
+  $('camEngineAI').classList.toggle('active', camera.preferredEngine === 'ai');
+  $('camEngineFlow').classList.toggle('active', camera.preferredEngine === 'flow');
+  $('camEngineBadge').textContent = camera.getEngineBadge();
   $('cameraPip').classList.toggle('hidden', !showPip);
 }
 
@@ -1183,7 +1206,6 @@ function wireUI() {
   $('btnSound').addEventListener('click', () => {
     audio.toggle();
     updateSoundUI();
-  updateCameraUI();
   });
   $('btnRecord').addEventListener('click', toggleRecording);
 
@@ -1212,17 +1234,65 @@ function wireUI() {
       await toggleCameraFlow();
     }
   });
+  $('camEngineAI').addEventListener('click', () => {
+    camera.setPreferredEngine('ai');
+    updateCameraUI();
+  });
+  $('camEngineFlow').addEventListener('click', () => {
+    camera.setPreferredEngine('flow');
+    updateCameraUI();
+  });
   $('optCamSens').addEventListener('input', (e) => {
     camera.sensitivity = Number(e.target.value);
+    updateSliderFill(e.target);
+  });
+  $('optCamSmooth').addEventListener('input', (e) => {
+    camera.setSmoothness(Number(e.target.value));
     updateSliderFill(e.target);
   });
   $('optCamBounce').addEventListener('change', (e) => {
     camera.bounceEnabled = e.target.checked;
   });
+  $('optCamPinch').addEventListener('change', (e) => {
+    camera.pinchGrabEnabled = e.target.checked;
+    updateCameraUI();
+  });
   $('optCamFollow').addEventListener('change', (e) => {
     camera.followEnabled = e.target.checked;
     if (!camera.followEnabled) state.needsRender = true;
   });
+
+  // Mid-Air Pinch Grab callbacks (maps camera hand pinch directly into 1:1 mochi cheek grabs!)
+  const camNormToIso = (nx, ny) => {
+    const rect = glCanvas.getBoundingClientRect();
+    return renderer.isoFromClient(rect.left + nx * rect.width, rect.top + ny * rect.height);
+  };
+  camera.onPinchStart = (slot, nx, ny) => {
+    if (state.step !== 'play') return;
+    const iso = camNormToIso(nx, ny);
+    const g = physics.tryGrab(9000 + slot, iso.x, iso.y);
+    if (g) {
+      audio.playGrab();
+      state.needsRender = true;
+    }
+  };
+  camera.onPinchMove = (slot, nx, ny) => {
+    if (state.step !== 'play') return;
+    const iso = camNormToIso(nx, ny);
+    physics.move(9000 + slot, iso.x, iso.y);
+    state.needsRender = true;
+  };
+  camera.onPinchEnd = (slot) => {
+    const g = physics.release(9000 + slot);
+    if (g) {
+      audio.playRelease(physics.intensityOf(g), physics.params.releaseFreq);
+      state.needsRender = true;
+    }
+  };
+  camera.onEngineChange = (_eng, msg) => {
+    updateCameraUI();
+    if (msg) showToast(msg, 2800);
+  };
   $('optCamPreview').addEventListener('change', (e) => {
     camera.showPreview = e.target.checked;
     updateCameraUI();
@@ -1333,7 +1403,6 @@ function wireUI() {
   $('optVolume').addEventListener('input', (e) => {
     audio.setVolume(Number(e.target.value) / 100);
     updateSoundUI();
-  updateCameraUI();
     updateSliderFill(e.target);
   });
 

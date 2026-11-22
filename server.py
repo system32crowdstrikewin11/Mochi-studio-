@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Zero-dependency localhost server for Mochi Studio v19 (ES Modules + GLSL)."""
+"""Zero-dependency localhost server for Mochi Studio v20 (ES Modules + GLSL)."""
 import http.server
 import socketserver
 import sys
@@ -24,7 +24,7 @@ class MochiHandler(http.server.SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", PORT), MochiHandler) as httpd:
-        print(f"🍡 Mochi Studio v19 running at http://localhost:{PORT}")
+        print(f"🍡 Mochi Studio v20 running at http://localhost:{PORT}")
         print("Press Ctrl+C to stop.")
         try:
             httpd.serve_forever()
