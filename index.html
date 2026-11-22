@@ -18,7 +18,7 @@
   <meta name="twitter:title" content="Mochi Studio — Squishy Artwork & Motion Physics" />
   <meta name="twitter:description" content="Paint squishy zones on any image, then poke, pinch, tilt your phone, and record your own mochi. Runs entirely in your browser — free, no install." />
 
-  <link rel="stylesheet" href="./css/styles.css?v=18" />
+  <link rel="stylesheet" href="./css/styles.css?v=19" />
 </head>
 <body>
   <div class="app-shell">
@@ -154,6 +154,25 @@
         </div>
       </section>
 
+
+      <!-- Floating Camera Hand Tracking Mini Preview (PiP) -->
+      <section id="cameraPip" class="camera-pip hidden" aria-label="Camera Hand Tracking Preview">
+        <div class="campip-head">
+          <span class="campip-title">
+            <span class="campip-dot" aria-hidden="true"></span>
+            <span id="camDirBadge">Wave hand</span>
+          </span>
+          <div class="campip-btns">
+            <button id="btnCamFlip" class="campip-ico" title="Switch Front / Back Camera" aria-label="Flip Camera">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </button>
+            <button id="btnCamHide" class="campip-ico" title="Hide Preview (keeps tracking)" aria-label="Hide Preview">—</button>
+            <button id="btnCamClose" class="campip-ico" title="Turn Off Camera" aria-label="Stop Camera">✕</button>
+          </div>
+        </div>
+        <canvas id="camPreviewCanvas" class="campip-canvas" width="160" height="120"></canvas>
+      </section>
+
       <!-- Floating Bottom Dock (Inside Stage for Clean Card Aesthetic) -->
       <div class="dock-container">
         <!-- Paint Mode Floating Card Dock -->
@@ -217,6 +236,11 @@
           <button id="btnSensors" class="play-btn" title="Toggle Phone Motion Sensors">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="12" y1="18" x2="12.01" y2="18"/><path d="M2 9c.8-1.5 1.5-2 2-2"/><path d="M22 9c-.8-1.5-1.5-2-2-2"/></svg>
             <span id="btnSensorsLabel">Motion</span>
+          </button>
+
+          <button id="btnCamera" class="play-btn" title="Toggle Camera Hand Tracking">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+            <span id="btnCameraLabel">Camera</span>
           </button>
 
           <button id="btnSound" class="play-btn" title="Toggle Squish Sound">
@@ -328,6 +352,41 @@
           </div>
         </div>
 
+
+        <!-- Camera Hand Tracking -->
+        <div class="sheet-section">
+          <div class="section-title">Camera Hand Tracking</div>
+          <label class="toggle-row">
+            <span>Enable camera tracking</span>
+            <input type="checkbox" id="optCamera" />
+          </label>
+          <div class="row-slider">
+            <label for="optCamSens">Sensitivity</label>
+            <input type="range" id="optCamSens" min="20" max="100" value="65" />
+          </div>
+          <div class="motion-toggles-pair">
+            <label class="toggle-row inline-toggle">
+              <span>Wave bounce</span>
+              <input type="checkbox" id="optCamBounce" checked />
+            </label>
+            <label class="toggle-row inline-toggle">
+              <span>Follow hand</span>
+              <input type="checkbox" id="optCamFollow" />
+            </label>
+          </div>
+          <div class="motion-toggles-pair">
+            <label class="toggle-row inline-toggle">
+              <span>Show preview</span>
+              <input type="checkbox" id="optCamPreview" checked />
+            </label>
+            <label class="toggle-row inline-toggle">
+              <span>Mirror view</span>
+              <input type="checkbox" id="optCamMirror" checked />
+            </label>
+          </div>
+          <p class="section-note">Wave your hand up, down, left, right, or diagonally in front of the camera to bounce!</p>
+        </div>
+
         <!-- Sound -->
         <div class="sheet-section">
           <div class="section-title">Sound</div>
@@ -425,6 +484,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/main.js?v=18"></script>
+  <script type="module" src="./js/main.js?v=19"></script>
 </body>
 </html>

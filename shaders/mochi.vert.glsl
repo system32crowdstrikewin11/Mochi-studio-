@@ -9,7 +9,7 @@ uniform int uGrabCount;
 uniform vec4 uGrabA[8];             // anchor.xy (iso), radiusEff, strength (ease * mask)
 uniform vec2 uGrabPull[8];          // pull.xy (iso)
 uniform float uBulge;               // puffiness kappa
-uniform vec2 uMotionDisp;           // optional phone motion sensor displacement (iso)
+uniform vec2 uMotionDisp;           // optional phone motion / camera hand bounce displacement (iso)
 uniform sampler2D uMask;            // blurred squishy mask (R8)
 uniform float uMaskEnabled;
 uniform vec2 uMaskCell;             // 1 mesh cell in rest UV (for 4-tap smooth mask sampling)
@@ -37,6 +37,22 @@ float maskAt(vec2 uv) {
             textureLod(uMask, uv + vec2( h.x,  h.y), 0.0).r) * 0.25;
 }
 
+// Elastic soft-body bounce profile for whole-body motion/camera waves (zero when uMotionDisp == 0)
+vec2 softMotionDisp(vec2 uv, float m) {
+    if (dot(uMotionDisp, uMotionDisp) < 1e-10) return vec2(0.0);
+    if (uMaskEnabled > 0.5) {
+        return uMotionDisp * m;
+    }
+    // Unmasked whole image: jelly vertical shear + gentle volume-preserving squash & stretch
+    vec2 c = uv - vec2(0.5);
+    float topFlex = 0.48 + 0.72 * (1.0 - uv.y);
+    float centerDome = 0.85 + 0.28 * falloff(clamp(length(c * 1.5), 0.0, 1.0));
+    vec2 bounce = uMotionDisp * (topFlex * centerDome);
+    // Upward bounce stretches tall & slightly slimmer; downward bounce squishes plump & wider
+    vec2 squash = vec2(c.x * uMotionDisp.y * 0.55, -c.y * abs(uMotionDisp.x) * 0.40);
+    return bounce + squash;
+}
+
 void main() {
     vec2 iso = vec2(aRest.x * uAspect, aRest.y);
     vec2 disp = vec2(0.0);
@@ -57,15 +73,12 @@ void main() {
         float rVal = ring(t);
         disp += w * pull + uBulge * pullLen * rVal * dir * strength;
         wsum += w;
-        // Analytical directional strain for optional 3D squish shading (unused when uShading == 0)
         strainAcc += (dot(dir, pull) / max(0.05, uGrabA[i].z)) * rVal * strength;
     }
 
-    // Apply mask & normalize overlapping multi-finger grabs identically to original
     float m = uMaskEnabled > 0.5 ? maskAt(aRest) : 1.0;
-    disp = disp * (m / max(1.0, wsum)) + uMotionDisp * m;
+    disp = disp * (m / max(1.0, wsum)) + softMotionDisp(aRest, m);
 
-    // Depth-lift pulled parts forward so stretched cheeks cleanly overlap stationary background
     float lift = clamp(wsum, 0.0, 1.0) * m;
 
     vec3 clip = uView * vec3(iso + disp, 1.0);

@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v18 — Main Application Controller
+ * Mochi Studio v19 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
  * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
@@ -13,13 +13,14 @@ import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js?v=18';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=18';
-import { BrushEngine } from './brush-engine.js?v=18';
-import { MotionSensorManager } from './motion-sensors.js?v=18';
-import { SquishAudio } from './audio-squish.js?v=18';
-import { EngineRecorder } from './engine-recorder.js?v=18';
-import { getSample } from './samples.js?v=18';
+} from './physics-continuum.js?v=19';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=19';
+import { BrushEngine } from './brush-engine.js?v=19';
+import { MotionSensorManager } from './motion-sensors.js?v=19';
+import { CameraHandTracker } from './camera-tracker.js?v=19';
+import { SquishAudio } from './audio-squish.js?v=19';
+import { EngineRecorder } from './engine-recorder.js?v=19';
+import { getSample } from './samples.js?v=19';
 
 const $ = (id) => document.getElementById(id);
 const IMAGE_MAX_SIDE = 2048;
@@ -60,6 +61,7 @@ const brushPreviewEl = $('brushPreview');
 const renderer = new MochiRendererWebGL2(glCanvas, physics);
 const brush = new BrushEngine(512);
 const motion = new MotionSensorManager();
+const camera = new CameraHandTracker();
 const audio = new SquishAudio();
 const recorder = new EngineRecorder();
 
@@ -227,6 +229,9 @@ function setStep(nextStep) {
   brushCursorEl.classList.add('hidden');
   brushPreviewEl.classList.add('hidden');
   state.needsRender = true;
+
+  camera.paused = nextStep !== 'play';
+  updateCameraUI();
 
   if (nextStep === 'paint') {
     $('motionHud').classList.add('hidden');
@@ -562,13 +567,28 @@ function tick(now) {
       state.needsRender = false;
     }
   } else if (state.step === 'play') {
-    const f = motion.getCombinedForce();
-    const hasForce = Math.abs(f.gx) > 1e-4 || Math.abs(f.gy) > 1e-4 || Math.abs(f.ax) > 1e-4 || Math.abs(f.ay) > 1e-4;
-    physics.setMotionForce(f.gx, f.gy, f.ax, f.ay);
+    if (camera.enabled && !camera.paused) {
+      const previewCanvas = camera.showPreview ? $('camPreviewCanvas') : null;
+      camera.update(now, previewCanvas);
+      const badgeText = (now - camera.lastGestureTime < 900 && camera.lastGestureTime > 0)
+        ? camera.lastGestureText
+        : 'Wave hand';
+      const badgeEl = $('camDirBadge');
+      if (badgeEl.textContent !== badgeText) badgeEl.textContent = badgeText;
+    }
+
+    const mf = motion.getCombinedForce();
+    const cf = camera.enabled && !camera.paused ? camera.consumeForce() : { gx: 0, gy: 0, ax: 0, ay: 0 };
+    const gx = Math.max(-1.4, Math.min(1.4, mf.gx + cf.gx));
+    const gy = Math.max(-1.4, Math.min(1.4, mf.gy + cf.gy));
+    const ax = mf.ax + cf.ax;
+    const ay = mf.ay + cf.ay;
+    const hasForce = Math.abs(gx) > 1e-4 || Math.abs(gy) > 1e-4 || Math.abs(ax) > 1e-4 || Math.abs(ay) > 1e-4;
+    physics.setMotionForce(gx, gy, ax, ay);
 
     if (motion.enabled || motion.virtualEnabled) {
-      const dx = Math.max(-7, Math.min(7, f.gx * 7));
-      const dy = Math.max(-7, Math.min(7, f.gy * 7));
+      const dx = Math.max(-7, Math.min(7, gx * 7));
+      const dy = Math.max(-7, Math.min(7, gy * 7));
       $('tiltDot').style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
     }
 
@@ -937,6 +957,25 @@ function updateMotionHud() {
   $('btnCalibrate').classList.toggle('hidden', !motion.enabled);
 }
 
+
+function updateCameraUI() {
+  const on = camera.enabled;
+  const showPip = on && camera.showPreview && state.step === 'play';
+  $('btnCamera').classList.toggle('active', on);
+  $('btnCameraLabel').textContent = on ? 'Cam ON' : 'Camera';
+  $('optCamera').checked = on;
+  $('optCamPreview').checked = camera.showPreview;
+  $('optCamMirror').checked = camera.mirror;
+  $('cameraPip').classList.toggle('hidden', !showPip);
+}
+
+async function toggleCameraFlow() {
+  const res = await camera.toggle();
+  camera.paused = state.step !== 'play';
+  updateCameraUI();
+  if (res.message) showToast(res.message, 3000);
+}
+
 function updateSoundUI() {
   const on = audio.enabled && audio.volume > 0;
   $('svgSoundOn').classList.toggle('hidden', !on);
@@ -1144,6 +1183,7 @@ function wireUI() {
   $('btnSound').addEventListener('click', () => {
     audio.toggle();
     updateSoundUI();
+  updateCameraUI();
   });
   $('btnRecord').addEventListener('click', toggleRecording);
 
@@ -1164,6 +1204,57 @@ function wireUI() {
     state.needsRender = true;
   });
   motion.onStatusChange = (msg) => showToast(msg, 3200);
+
+  // Camera Hand Tracking Controls
+  $('btnCamera').addEventListener('click', toggleCameraFlow);
+  $('optCamera').addEventListener('change', async (e) => {
+    if (e.target.checked !== camera.enabled) {
+      await toggleCameraFlow();
+    }
+  });
+  $('optCamSens').addEventListener('input', (e) => {
+    camera.sensitivity = Number(e.target.value);
+    updateSliderFill(e.target);
+  });
+  $('optCamBounce').addEventListener('change', (e) => {
+    camera.bounceEnabled = e.target.checked;
+  });
+  $('optCamFollow').addEventListener('change', (e) => {
+    camera.followEnabled = e.target.checked;
+    if (!camera.followEnabled) state.needsRender = true;
+  });
+  $('optCamPreview').addEventListener('change', (e) => {
+    camera.showPreview = e.target.checked;
+    updateCameraUI();
+  });
+  $('optCamMirror').addEventListener('change', (e) => {
+    camera.mirror = e.target.checked;
+  });
+
+  $('btnCamFlip').addEventListener('click', async () => {
+    const res = await camera.flipCamera();
+    updateCameraUI();
+    showToast(camera.facingMode === 'user' ? 'Switched to Front Camera' : 'Switched to Back Camera', 1800);
+  });
+  $('btnCamHide').addEventListener('click', () => {
+    camera.showPreview = false;
+    updateCameraUI();
+    showToast('Camera preview hidden (still tracking!)', 2000);
+  });
+  $('btnCamClose').addEventListener('click', () => {
+    camera.stop();
+    updateCameraUI();
+    showToast('Camera tracking turned off', 1800);
+  });
+
+  camera.onGestureBounce = (intensity) => {
+    audio.playRelease(Math.min(0.85, 0.25 + intensity * 0.6), physics.params.releaseFreq);
+    state.needsRender = true;
+  };
+
+  window.addEventListener('pagehide', () => {
+    if (camera.enabled) camera.stop();
+  });
 
   // Settings Bottom Sheet
   const openSettings = (open) => {
@@ -1242,6 +1333,7 @@ function wireUI() {
   $('optVolume').addEventListener('input', (e) => {
     audio.setVolume(Number(e.target.value) / 100);
     updateSoundUI();
+  updateCameraUI();
     updateSliderFill(e.target);
   });
 
@@ -1332,6 +1424,7 @@ async function boot() {
   syncSlidersFromPhysics();
   syncBrushSizeSlider();
   updateSoundUI();
+  updateCameraUI();
   refreshAllSliderFills();
 
   selectSample('bear', 'play', true);

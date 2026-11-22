@@ -229,9 +229,26 @@ export class MochiPhysicsContinuum {
 
     const m = this.maskEnabled ? this.maskSample(u, v) : 1;
     const norm = m / Math.max(1, wSum);
+    let mdx = 0;
+    let mdy = 0;
+    const mx = this.motionPull.x;
+    const my = this.motionPull.y;
+    if (mx * mx + my * my > 1e-10) {
+      if (this.maskEnabled) {
+        mdx = mx * m;
+        mdy = my * m;
+      } else {
+        const cx = u - 0.5;
+        const cy = v - 0.5;
+        const tf = 0.48 + 0.72 * (1 - v);
+        const cd = 0.85 + 0.28 * falloff(Math.min(1, Math.hypot(cx * 1.5, cy * 1.5)));
+        mdx = mx * tf * cd + cx * my * 0.55;
+        mdy = my * tf * cd - cy * Math.abs(mx) * 0.40;
+      }
+    }
     return {
-      x: dxSum * norm + this.motionPull.x * m,
-      y: dySum * norm + this.motionPull.y * m,
+      x: dxSum * norm + mdx,
+      y: dySum * norm + mdy,
     };
   }
 

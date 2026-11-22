@@ -10,8 +10,8 @@
  * - Returns a ready-to-preview `File` object for the Recording Preview Modal & OS Share Sheet!
  */
 
-import { MiniWebmMuxer } from './webm-muxer.js?v=18';
-import { MiniGifEncoder } from './gif-encoder.js?v=18';
+import { MiniWebmMuxer } from './webm-muxer.js?v=19';
+import { MiniGifEncoder } from './gif-encoder.js?v=19';
 
 function makeEven(n, minVal = 64) {
   const v = Math.max(minVal, Math.round(n));
@@ -314,7 +314,7 @@ export class EngineRecorder {
     return new Promise((resolve, reject) => {
       let worker;
       try {
-        worker = new Worker(new URL('./gif-worker.js?v=18', import.meta.url));
+        worker = new Worker(new URL('./gif-worker.js?v=19', import.meta.url));
       } catch (err) {
         reject(err);
         return;

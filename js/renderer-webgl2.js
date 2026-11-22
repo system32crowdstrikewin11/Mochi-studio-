@@ -1,5 +1,5 @@
 /**
- * MochiRendererWebGL2 v18 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
+ * MochiRendererWebGL2 v19 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
  *
  * - Dense 128..192 segment WebGL2 mesh with GPU analytic quintic-falloff physics,
  *   ring bulge, 4-tap mask smoothing, depth-lift, bicubic zoom sampling, and Paint mask view
@@ -35,7 +35,7 @@ void main(){
   vec2 disp=vec2(0.0);float wsum=0.0;float sa=0.0;
   for(int i=0;i<8;i++){if(i>=uGrabCount)break;float st=uGrabA[i].w;if(st<=0.0)continue;vec2 rel=iso-uGrabA[i].xy;float d=length(rel);float t=clamp(d/uGrabA[i].z,0.0,1.0);float w=falloff(t)*st;vec2 pull=uGrabPull[i];float pl=length(pull);vec2 dir=d>1e-5?rel/d:vec2(0.0);float rv=ring(t);disp+=w*pull+uBulge*pl*rv*dir*st;wsum+=w;sa+=(dot(dir,pull)/max(0.05,uGrabA[i].z))*rv*st;}
   float m=uMaskEnabled>0.5?maskAt(aRest):1.0;
-  disp=disp*(m/max(1.0,wsum))+uMotionDisp*m;
+  vec2 md=vec2(0.0);if(dot(uMotionDisp,uMotionDisp)>1e-10){if(uMaskEnabled>0.5){md=uMotionDisp*m;}else{vec2 c=aRest-vec2(0.5);float tf=0.48+0.72*(1.0-aRest.y);float cd=0.85+0.28*falloff(clamp(length(c*1.5),0.0,1.0));md=uMotionDisp*(tf*cd)+vec2(c.x*uMotionDisp.y*0.55,-c.y*abs(uMotionDisp.x)*0.40);}}disp=disp*(m/max(1.0,wsum))+md;
   float lift=clamp(wsum,0.0,1.0)*m;
   vec3 clip=uView*vec3(iso+disp,1.0);
   gl_Position=vec4(clip.xy,-0.5*lift,1.0);
@@ -122,8 +122,8 @@ export class MochiRendererWebGL2 {
   async init() {
     try {
       const [vRes, fRes] = await Promise.all([
-        fetch('./shaders/mochi.vert.glsl?v=18'),
-        fetch('./shaders/mochi.frag.glsl?v=18'),
+        fetch('./shaders/mochi.vert.glsl?v=19'),
+        fetch('./shaders/mochi.frag.glsl?v=19'),
       ]);
       if (vRes.ok && fRes.ok) {
         this.vertSrc = await vRes.text();

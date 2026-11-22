@@ -1,5 +1,5 @@
 /* =========================================================
-   Mochi Studio v18 — Clean Pastel Polka-Dot & Dark Studio CSS3
+   Mochi Studio v19 — Clean Pastel Polka-Dot & Dark Studio CSS3
    ========================================================= */
 
 :root {
@@ -734,10 +734,10 @@ html, body {
 .play-dock {
   pointer-events: auto;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 4px;
-  width: min(460px, 100%);
-  padding: 7px 8px;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+  width: min(500px, 100%);
+  padding: 7px 6px;
   border-radius: 22px;
   background: var(--card);
   backdrop-filter: blur(12px);
@@ -1321,6 +1321,113 @@ input[type="range"].brush-size-slider::-moz-range-thumb {
   background: var(--bg);
   padding: 16px;
   z-index: 100;
+}
+
+
+/* Floating Camera Hand Tracking Mini Preview (PiP) */
+.camera-pip {
+  position: absolute;
+  left: 12px;
+  bottom: 92px;
+  width: 152px;
+  background: var(--card);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1.5px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-card);
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 22;
+}
+
+.campip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.campip-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10.5px;
+  font-weight: 800;
+  color: var(--accent-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.campip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34c759;
+  flex: 0 0 auto;
+  box-shadow: 0 0 6px rgba(52, 199, 89, 0.7);
+}
+
+.campip-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+}
+
+.campip-ico {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--soft-pink);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.campip-ico:active { transform: scale(0.90); }
+
+.campip-canvas {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 12px;
+  display: block;
+  background: #1a1520;
+  border: 1px solid var(--border);
+}
+
+/* Compact 7-Button Play Dock on narrow mobile viewports */
+@media (max-width: 440px) {
+  .dock-container {
+    left: 8px;
+    right: 8px;
+  }
+  .play-dock {
+    gap: 1px;
+    padding: 6px 4px;
+  }
+  .play-btn {
+    font-size: 9.5px;
+    padding: 6px 1px;
+    gap: 3px;
+  }
+  .play-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+  .camera-pip {
+    width: 138px;
+    bottom: 84px;
+  }
 }
 
 .hidden { display: none !important; }

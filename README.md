@@ -1,4 +1,4 @@
-# Mochi Studio v18
+# Mochi Studio v19
 
 Interactive squishy artwork studio built with **HTML5**, **CSS3**, **GLSL ES 3.00 (WebGL2)**, **ES Modules JavaScript**, **WebCodecs + Pure-JS WebM Muxer**, **Adaptive 256-Color GIF Web Worker**, and **Web Audio API**.
 
@@ -29,6 +29,8 @@ Open `http://localhost:25565` in your mobile or desktop browser.
   - **2-finger Zoom, Pan & Rotation** in both Paint and Play modes with auto-hiding **Reset view**.
 - **EXIF-Aware Image Import:**
   - Global drag-and-drop anywhere on the page, Ctrl+V paste, file picker, or built-in samples, auto-oriented from EXIF and smoothly capped at 2048px.
+- **Camera Hand Gesture Tracking (360° Directional Bounce):**
+  - Tap **Camera** in Play mode to bounce the mochi in any direction (**Up, Down, Left, Right, or Diagonals**) by waving your hand in front of the camera—100% local real-time optical flow with zero external dependencies, live mini preview with vector arrow, front/back flip, mirror toggle, and optional **Follow hand** mode.
 - **Optional Phone Motion Sensors:**
   - Real-time tilt gravity & shake jiggle plus an interactive **Virtual Tilt Pad**.
 - **Direct Engine Video & Adaptive GIF Recording + Preview/Share Modal:**
