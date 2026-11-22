@@ -1,5 +1,5 @@
 /* =========================================================
-   Mochi Studio v16 — Clean Pastel Polka-Dot & Dark Studio CSS3
+   Mochi Studio v17 — Clean Pastel Polka-Dot & Dark Studio CSS3
    ========================================================= */
 
 :root {
@@ -1100,6 +1100,43 @@ input[type="range"]::-webkit-slider-thumb {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+
+/* Exact 1:1 Original Brush Cursor & Center Size Preview */
+.brush-cursor {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: rgba(255, 143, 171, 0.16);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.brush-preview {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  background: rgba(255, 143, 171, 0.22);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 15;
+}
+
+.brush-cursor.soft,
+.brush-preview.soft {
+  border-style: dashed;
+  background: radial-gradient(circle, rgba(255, 143, 171, 0.40), rgba(255, 143, 171, 0.18) 55%, rgba(255, 143, 171, 0));
+}
+
+.brush-cursor.eraser,
+.brush-preview.eraser {
+  border-style: dashed;
+  border-color: var(--accent-strong);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .hidden { display: none !important; }

@@ -55,8 +55,11 @@
     <main class="stage-wrap" id="stageWrap">
       <!-- WebGL2 Artwork Canvas -->
       <canvas id="glCanvas" class="stage-canvas"></canvas>
-      <!-- 2D Overlay Canvas (Paint Mask, Brush Cursor, Multi-Touch Dots) -->
+      <!-- 2D Overlay Canvas (Desktop Pointer Indicator) -->
       <canvas id="overlayCanvas" class="stage-canvas overlay-canvas"></canvas>
+      <!-- Exact 1:1 Original Brush Cursor & Center Size Preview -->
+      <div id="brushCursor" class="brush-cursor hidden"></div>
+      <div id="brushPreview" class="brush-preview hidden"></div>
 
       <!-- Top Floating Paint Hint Pill (Paint Mode only) -->
       <div id="paintHint" class="paint-hint hidden">
@@ -180,7 +183,7 @@
           <div class="paint-row-mid">
             <div class="size-slider-col">
               <span class="size-label">Size</span>
-              <input type="range" id="brushSize" min="10" max="76" value="30" />
+              <input type="range" id="brushSize" min="0.01" max="0.20" step="0.0025" value="0.07" />
             </div>
 
             <button id="btnClearMask" class="clear-box" title="Clear all painted areas">

@@ -1,6 +1,12 @@
-# Mochi Studio v16
+# Mochi Studio v17
 
 Interactive squishy artwork studio built with **HTML5**, **CSS3**, **GLSL ES 3.00 (WebGL2)**, **ES Modules JavaScript**, **WebCodecs + Pure-JS WebM Muxer**, and **Web Audio API**.
+
+## ▶ Try it live
+
+**[Launch Mochi Studio →](https://system32crowdstrikewin11.github.io/Mochi-studio-/)**
+
+No install needed — runs entirely in your browser. Phone motion sensors work over HTTPS, so you can try tilt & shake right on your phone.
 
 ## Run on Localhost (Port 25565)
 
@@ -22,3 +28,9 @@ Open `http://localhost:25565` in your mobile or desktop browser.
   - **GIF:** Lightweight **15 FPS** by default, with an optional **High-FPS GIF (up to 60 FPS)** toggle in Settings.
 - **Paint Mode:**
   - Zero-lag Spotlight-Reveal brush (**Sharp / Soft**, zoom-adaptive **Size**, **Undo / Redo**, **Clear all**, **All squishy**, plus **2-finger Zoom & Pan**).
+
+## Credits
+
+- Inspired by [もちほっぺ・メーカー (Moti Hoppe Maker)](https://sabanogames.com/entertainments/moti_hoppe_maker/) by SABANO GAMES — huge thanks for the original squishy-cheek inspiration!
+- All code, built-in sample artwork, physics, and audio in this project are original and made from scratch.
+

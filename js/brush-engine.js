@@ -1,129 +1,106 @@
 /**
- * BrushEngine v11 — Zero-Lag, User-Friendly Spotlight-Reveal Brush Engine
+ * BrushEngine v17 — Exact 1:1 Port of Original MaskLayer & MaskTool (+ Undo/Redo)
  *
- * Key UX upgrades matching authentic mochi-maker painting feel:
- * 1. Spotlight-Reveal Visualization:
- *    - Unpainted artwork is softly frosted/veiled so it stays easy to see.
- *    - Painting lifts the veil to reveal 100% crisp, bright artwork underneath,
- *      with a subtle rosy tint on painted transparent areas and a clean edge contrast!
- *    - Never buries facial details under heavy opaque pink paint.
- * 2. True 1:1 Zero-Lag Tracking:
- *    - Direct pointer tracking with quadratic midpoint smoothing (zero sluggish drag!).
- *    - Sharp mode (default) uses native vector round strokes (razor-clean & instant).
- *    - Soft mode uses smooth equidistant radial feathering with uniform stroke layer.
- * 3. Screen-Relative Precision Sizing:
- *    - Brush radius adapts naturally to camera zoom, so zooming in automatically gives
- *      finer detail control while keeping a comfortable fingertip size on screen!
- * 4. Instant Stroke Start + Lossless 2-Finger Pinch-Zoom Cancel + Full Undo/Redo.
+ * Fixes all aspect-ratio stretching and cursor/paint mismatch issues:
+ * - Aspect-matched mask canvas (longest side = 512px, width/height === image aspect)
+ *   so stamping radius = brushRadius * S * canvas.height draws a mathematically
+ *   exact circle matching the screen cursor ring pixel-for-pixel at EVERY aspect
+ *   ratio (portrait, landscape, square) and EVERY zoom level!
+ * - Sharp (Hard): lighten (#fff) / darken (#000) crisp solid circle.
+ * - Soft: 4-stop radial airbrush gradient at 0.12 opacity per stamp for smooth buildup.
+ * - Streamline = 0.35 smoothing with 0.4 * r spacing and exact tail completion on release.
+ * - Direct GPU Paint-mode rendering (unblurred canvas uploaded to WebGL2 uMask),
+ *   and blurred textureSource (maskBlur = 0.008) for silky Play-mode deformation.
+ * - Keeps 30-step Undo/Redo + lossless 2-finger pinch-zoom stroke cancellation!
  */
 
+const MASK_SIZE = 512;
+const MASK_BLUR = 0.008;
+
 export class BrushEngine {
-  constructor(maskSize = 512) {
+  constructor(maskSize = MASK_SIZE) {
     this.maskSize = maskSize;
+    this.aspect = 1.0;
 
-    // Committed squishy mask (alpha channel = squishy weight 0..255)
-    this.maskCanvas = document.createElement('canvas');
-    this.maskCanvas.width = maskSize;
-    this.maskCanvas.height = maskSize;
-    this.maskCtx = this.maskCanvas.getContext('2d', { willReadFrequently: true });
+    // Exact original opaque RGB mask & blurred mask canvases (black = fixed, white = squishy)
+    this.canvas = document.createElement('canvas');
+    this.canvas.width = 1;
+    this.canvas.height = 1;
+    this.ctx = this.canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
-    // Temporary uniform-opacity active stroke canvas
-    this.strokeCanvas = document.createElement('canvas');
-    this.strokeCanvas.width = maskSize;
-    this.strokeCanvas.height = maskSize;
-    this.strokeCtx = this.strokeCanvas.getContext('2d');
+    this.blurCanvas = document.createElement('canvas');
+    this.blurCanvas.width = 1;
+    this.blurCanvas.height = 1;
+    this.blurCtx = this.blurCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
-    // Artwork alpha silhouette (used to clip frosted veil cleanly to artwork pixels)
-    this.artAlphaCanvas = document.createElement('canvas');
-    this.artAlphaCanvas.width = maskSize;
-    this.artAlphaCanvas.height = maskSize;
-    this.artAlphaCtx = this.artAlphaCanvas.getContext('2d');
+    this.dirty = false;
+    this.blurDirty = true;
+    this.painted = false;
+    this.data = null;
 
-    // Offscreen compositing buffers for fast zero-GC Spotlight-Reveal preview
-    this.combinedCanvas = document.createElement('canvas');
-    this.combinedCanvas.width = maskSize;
-    this.combinedCanvas.height = maskSize;
-    this.combinedCtx = this.combinedCanvas.getContext('2d');
+    // Stroke cancellation snapshot (exact original beginStroke / cancelStroke for 2-finger pinch)
+    this.preStrokeSnap = null;
+    this.preStrokePainted = false;
 
-    this.veilCanvas = document.createElement('canvas');
-    this.veilCanvas.width = maskSize;
-    this.veilCanvas.height = maskSize;
-    this.veilCtx = this.veilCanvas.getContext('2d');
-
-    this.outsideTintCanvas = document.createElement('canvas');
-    this.outsideTintCanvas.width = maskSize;
-    this.outsideTintCanvas.height = maskSize;
-    this.outsideTintCtx = this.outsideTintCanvas.getContext('2d');
-
-    this.previewCanvas = document.createElement('canvas');
-    this.previewCanvas.width = maskSize;
-    this.previewCanvas.height = maskSize;
-    this.previewCtx = this.previewCanvas.getContext('2d');
-
-    this.preStrokeImage = null;
+    // Full Undo / Redo stack
     this.undoStack = [];
     this.redoStack = [];
     this.maxHistory = 30;
 
-    // Tool defaults: Brush + Sharp edge + fingertip-friendly 30px screen radius
-    this.tool = 'brush';      // 'brush' | 'eraser'
-    this.edge = 'sharp';      // 'sharp' | 'soft'
-    this.screenRadius = 30;   // CSS pixels on screen (range 10..76)
-    this.activeMaskRadius = 32;
+    // Exact original MaskTool properties
+    this.brushRadius = 0.07; // range 0.01 .. 0.20 (in iso units relative to S = min(1, aspect))
+    this.brushType = 'hard'; // 'hard' | 'soft'
+    this.erasing = false;
+    this.streamline = 0.35;
 
-    // Active stroke state (1:1 exact pointer tracking!)
+    // Active stroke state
     this.isDrawing = false;
-    this.strokeStartTime = 0;
-    this.strokeTravelPx = 0;
-    this.lastRawX = 0;
-    this.lastRawY = 0;
-    this.lastMidX = 0;
-    this.lastMidY = 0;
-    this.lastStampX = 0;
-    this.lastStampY = 0;
-
-    // Live cursor & size-slider preview ring (CSS coordinates)
-    this.cursor = { visible: false, x: 0, y: 0, screenRadius: 30, isSizePreview: false };
-
-    // Blurred opaque grayscale mask for GPU R8 texture & CPU grab sampling (exact 0.008*size blur)
-    this.blurMaskCanvas = document.createElement('canvas');
-    this.blurMaskCanvas.width = maskSize;
-    this.blurMaskCanvas.height = maskSize;
-    this.blurMaskCtx = this.blurMaskCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
-    this._blurDirty = true;
-    this._blurData = null;
-
-    this._lastTheme = 'light';
-    this._previewDirty = true;
+    this.last = null;
+    this.smooth = null;
+    this.lastRaw = null;
+    this.pendingS = 1;
 
     this.onHistoryChange = null;
-    this.onMaskCommit = null;
   }
 
-  /** Capture artwork alpha so unpainted frosting hugs transparent PNGs cleanly */
-  setArtworkSource(imgOrCanvas) {
-    const ctx = this.artAlphaCtx;
-    const S = this.maskSize;
-    ctx.clearRect(0, 0, S, S);
-    ctx.drawImage(imgOrCanvas, 0, 0, S, S);
-    // Keep only alpha mask (solid white everywhere artwork has alpha)
-    ctx.globalCompositeOperation = 'source-in';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, S, S);
-    ctx.globalCompositeOperation = 'source-over';
-    this._previewDirty = true;
+  /** Match mask canvas aspect ratio to image aspect so circles are 100% circular & 1:1 with cursor! */
+  setup(aspect) {
+    this.aspect = Math.max(0.05, aspect || 1.0);
+    const maxS = this.maskSize;
+    const w = this.aspect >= 1 ? maxS : Math.max(1, Math.round(maxS * this.aspect));
+    const h = this.aspect >= 1 ? Math.max(1, Math.round(maxS / this.aspect)) : maxS;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    this.blurCanvas.width = w;
+    this.blurCanvas.height = h;
+    this.resetHistory();
+    this.clear(false);
   }
 
-  markPreviewDirty() {
-    this._previewDirty = true;
+  ensureBlur() {
+    if (!this.blurDirty) return;
+    const { width: w, height: h } = this.canvas;
+    const blurPx = Math.max(2, Math.round(Math.max(w, h) * MASK_BLUR));
+    const ctx = this.blurCtx;
+    ctx.filter = 'none';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(this.canvas, 0, 0);
+    ctx.filter = 'none';
+    this.blurDirty = false;
   }
 
-  _pushUndoSnapshot() {
-    const snap = this.maskCtx.getImageData(0, 0, this.maskSize, this.maskSize);
-    this.undoStack.push(snap);
-    if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
-    this.redoStack.length = 0;
-    this._emitHistory();
+  /** Blurred mask canvas for Play mode WebGL2 uMask texture */
+  textureSource() {
+    this.ensureBlur();
+    return this.blurCanvas;
+  }
+
+  invalidate() {
+    this.dirty = true;
+    this.blurDirty = true;
+    this.data = null;
   }
 
   _emitHistory() {
@@ -132,309 +109,263 @@ export class BrushEngine {
     }
   }
 
-  undo() {
-    if (this.undoStack.length === 0) return false;
-    this.redoStack.push(this.maskCtx.getImageData(0, 0, this.maskSize, this.maskSize));
-    this.maskCtx.putImageData(this.undoStack.pop(), 0, 0);
-    this._previewDirty = true;
-    this._emitHistory();
-    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
-    return true;
-  }
-
-  redo() {
-    if (this.redoStack.length === 0) return false;
-    this.undoStack.push(this.maskCtx.getImageData(0, 0, this.maskSize, this.maskSize));
-    this.maskCtx.putImageData(this.redoStack.pop(), 0, 0);
-    this._previewDirty = true;
-    this._emitHistory();
-    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
-    return true;
-  }
-
-  clear(recordUndo = true) {
-    if (recordUndo) this._pushUndoSnapshot();
-    this.maskCtx.clearRect(0, 0, this.maskSize, this.maskSize);
-    this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
-    this._previewDirty = true;
-    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
-  }
-
-  hasAnyPaint() {
-    const d = this.maskCtx.getImageData(0, 0, this.maskSize, this.maskSize).data;
-    for (let i = 3; i < d.length; i += 32) {
-      if (d[i] > 12) return true;
+  _recheckPainted() {
+    const img = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height).data;
+    for (let i = 0; i < img.length; i += 16) {
+      if (img[i] > 4) {
+        this.painted = true;
+        return true;
+      }
     }
+    this.painted = false;
     return false;
   }
 
-  setMaskFromCanvas(srcCanvas, recordUndo = false) {
-    if (recordUndo) this._pushUndoSnapshot();
-    this.maskCtx.clearRect(0, 0, this.maskSize, this.maskSize);
-    this.maskCtx.drawImage(srcCanvas, 0, 0, this.maskSize, this.maskSize);
-    this._previewDirty = true;
-    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
+  hasAnyPaint() {
+    if (!this.painted) return false;
+    return this._recheckPainted();
   }
 
   resetHistory() {
     this.undoStack.length = 0;
     this.redoStack.length = 0;
+    this.preStrokeSnap = null;
     this._emitHistory();
   }
 
-  /** Build blurred grayscale mask canvas (black = fixed, white = squishy) matching original maskBlur=0.008 */
-  getBlurredMaskCanvas() {
-    if (!this._blurDirty) return this.blurMaskCanvas;
-    const S = this.maskSize;
-    const blurPx = Math.max(2, Math.round(S * 0.008));
-    const ctx = this.blurMaskCtx;
-    ctx.filter = 'none';
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, S, S);
-    ctx.filter = `blur(${blurPx}px)`;
-    ctx.drawImage(this.maskCanvas, 0, 0);
-    ctx.filter = 'none';
-    this._blurDirty = false;
-    this._blurData = null;
-    return this.blurMaskCanvas;
-  }
-
-  sampleBlurred = (u, v) => {
-    if (this._blurDirty || !this._blurData) {
-      this.getBlurredMaskCanvas();
-      this._blurData = this.blurMaskCtx.getImageData(0, 0, this.maskSize, this.maskSize);
+  clear(recordUndo = true) {
+    if (recordUndo && this.hasAnyPaint()) {
+      this.undoStack.push({
+        img: this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+        painted: this.painted,
+      });
+      if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+      this.redoStack.length = 0;
+      this._emitHistory();
     }
-    const { data, width, height } = this._blurData;
-    const ix = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
-    const iy = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
-    return data[(iy * width + ix) * 4] / 255;
-  };
-
-  uvToMask(u, v) {
-    return { x: u * this.maskSize, y: v * this.maskSize };
+    this.ctx.globalCompositeOperation = 'source-over';
+    this.ctx.fillStyle = '#000';
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    this.painted = false;
+    this.preStrokeSnap = null;
+    this.isDrawing = false;
+    this.last = null;
+    this.smooth = null;
+    this.lastRaw = null;
+    this.invalidate();
   }
 
-  worldToMask(wx, wy, hw, hh) {
-    const u = (wx / (2 * hw)) + 0.5;
-    const v = (wy / (2 * hh)) + 0.5;
-    return { x: u * this.maskSize, y: v * this.maskSize };
-  }
+  /** Fill whole character (or entire opaque image) white cleanly on the aspect-matched canvas */
+  fillAll(artworkSource = null, recordUndo = true) {
+    if (recordUndo) {
+      this.undoStack.push({
+        img: this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+        painted: this.painted,
+      });
+      if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+      this.redoStack.length = 0;
+      this._emitHistory();
+    }
 
-  /**
-   * Begin a stroke immediately (zero lag!) using screen-relative maskRadius.
-   * Pre-stroke state is preserved so a quick 2nd finger for Pinch-Zoom cancels losslessly.
-   */
-  beginStroke(mx, my, maskRadius) {
-    this.activeMaskRadius = Math.max(3, Math.min(180, maskRadius));
-    this.preStrokeImage = this.maskCtx.getImageData(0, 0, this.maskSize, this.maskSize);
-    this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
+    const { width: w, height: h } = this.canvas;
+    const ctx = this.ctx;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
 
-    this.isDrawing = true;
-    this.strokeStartTime = performance.now();
-    this.strokeTravelPx = 0;
-    this.lastRawX = mx;
-    this.lastRawY = my;
-    this.lastMidX = mx;
-    this.lastMidY = my;
-    this.lastStampX = mx;
-    this.lastStampY = my;
-
-    this._stampPoint(mx, my);
-    this._previewDirty = true;
-  }
-
-  moveStroke(mx, my) {
-    if (!this.isDrawing) return;
-
-    const dx = mx - this.lastRawX;
-    const dy = my - this.lastRawY;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 0.35) return;
-
-    this.strokeTravelPx += dist;
-    const midX = (this.lastRawX + mx) * 0.5;
-    const midY = (this.lastRawY + my) * 0.5;
-
-    if (this.edge === 'sharp') {
-      // Crisp, zero-lag native vector quadratic stroke with round caps!
-      const ctx = this.strokeCtx;
-      ctx.save();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = this.activeMaskRadius * 2;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      ctx.moveTo(this.lastMidX, this.lastMidY);
-      ctx.quadraticCurveTo(this.lastRawX, this.lastRawY, midX, midY);
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      // Silky soft-feathered equidistant radial stamps along exact quadratic curve
-      const step = Math.max(1.5, this.activeMaskRadius * 0.14);
-      const chord = Math.hypot(midX - this.lastMidX, midY - this.lastMidY);
-      const segs = Math.max(1, Math.ceil(chord / step));
-      for (let s = 1; s <= segs; s++) {
-        const t = s / segs;
-        const omt = 1 - t;
-        const qx = omt * omt * this.lastMidX + 2 * omt * t * this.lastRawX + t * t * midX;
-        const qy = omt * omt * this.lastMidY + 2 * omt * t * this.lastRawY + t * t * midY;
-        if (Math.hypot(qx - this.lastStampX, qy - this.lastStampY) >= step * 0.72) {
-          this._stampSoft(qx, qy);
-          this.lastStampX = qx;
-          this.lastStampY = qy;
+    if (artworkSource) {
+      const tmp = document.createElement('canvas');
+      tmp.width = w;
+      tmp.height = h;
+      const tctx = tmp.getContext('2d', { willReadFrequently: true });
+      tctx.drawImage(artworkSource, 0, 0, w, h);
+      const src = tctx.getImageData(0, 0, w, h).data;
+      let transparentCount = 0;
+      for (let i = 3; i < src.length; i += 16) {
+        if (src[i] < 200) transparentCount++;
+      }
+      if (transparentCount > (w * h / 4) * 0.06) {
+        const out = ctx.createImageData(w, h);
+        const od = out.data;
+        for (let i = 0; i < src.length; i += 4) {
+          const v = src[i + 3] > 20 ? 255 : 0;
+          od[i] = v;
+          od[i + 1] = v;
+          od[i + 2] = v;
+          od[i + 3] = 255;
         }
+        ctx.putImageData(out, 0, 0);
+        this.painted = true;
+        this.invalidate();
+        return;
       }
     }
 
-    this.lastRawX = mx;
-    this.lastRawY = my;
-    this.lastMidX = midX;
-    this.lastMidY = midY;
-    this._previewDirty = true;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, w, h);
+    this.painted = true;
+    this.invalidate();
+  }
+
+  undo() {
+    if (this.undoStack.length === 0) return false;
+    this.redoStack.push({
+      img: this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+      painted: this.painted,
+    });
+    const prev = this.undoStack.pop();
+    this.ctx.putImageData(prev.img, 0, 0);
+    this.painted = prev.painted;
+    this.invalidate();
+    this._emitHistory();
+    return true;
+  }
+
+  redo() {
+    if (this.redoStack.length === 0) return false;
+    this.undoStack.push({
+      img: this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height),
+      painted: this.painted,
+    });
+    const next = this.redoStack.pop();
+    this.ctx.putImageData(next.img, 0, 0);
+    this.painted = next.painted;
+    this.invalidate();
+    this._emitHistory();
+    return true;
+  }
+
+  /** Exact original single circular stamp in UV [0..1] + rIso = brushRadius * S */
+  stamp(u, v, rIso, erasing, isSoft = false) {
+    const { width: w, height: h } = this.canvas;
+    const cx = u * w;
+    const cy = v * h;
+    const rPx = Math.max(1, rIso * h);
+    const ctx = this.ctx;
+
+    if (isSoft) {
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rPx);
+      const rgb = erasing ? '0,0,0' : '255,255,255';
+      const maxAlpha = 0.12;
+      const stops = [
+        [0, 1],
+        [0.4, 0.65],
+        [0.7, 0.3],
+        [1, 0],
+      ];
+      for (let i = 0; i < stops.length; i++) {
+        grad.addColorStop(stops[i][0], `rgba(${rgb},${(maxAlpha * stops[i][1]).toFixed(4)})`);
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx - rPx, cy - rPx, rPx * 2, rPx * 2);
+    } else {
+      ctx.globalCompositeOperation = erasing ? 'darken' : 'lighten';
+      ctx.fillStyle = erasing ? '#000' : '#fff';
+      ctx.beginPath();
+      ctx.arc(cx, cy, rPx, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    if (!erasing) this.painted = true;
+    this.invalidate();
+  }
+
+  beginStroke() {
+    this.preStrokeSnap = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
+    this.preStrokePainted = this.painted;
+    this.isDrawing = true;
+    this.last = null;
+    this.smooth = null;
+    this.lastRaw = null;
+  }
+
+  /** Exact original streamline + equidistant stamping along segment */
+  strokeTo(u, v, S) {
+    if (!this.isDrawing) return;
+    this.lastRaw = { x: u, y: v };
+    this.pendingS = S;
+
+    if (!this.smooth) {
+      this.smooth = { x: u, y: v };
+      this.stamp(u, v, this.brushRadius * S, this.erasing, this.brushType === 'soft');
+      this.last = { x: u, y: v };
+      return;
+    }
+
+    this.smooth.x += (u - this.smooth.x) * this.streamline;
+    this.smooth.y += (v - this.smooth.y) * this.streamline;
+    this._stampSegment(this.smooth.x, this.smooth.y, S);
+  }
+
+  _stampSegment(u, v, S) {
+    const rIso = this.brushRadius * S;
+    const isSoft = this.brushType === 'soft';
+    if (!this.last) {
+      this.stamp(u, v, rIso, this.erasing, isSoft);
+    } else {
+      const du = u - this.last.x;
+      const dv = v - this.last.y;
+      // Isotropic travel distance ensures uniform spacing horizontally & vertically at all aspect ratios
+      const distIso = Math.hypot(du * this.aspect, dv);
+      const step = Math.max(rIso * 0.4, 1e-4);
+      const steps = Math.min(200, Math.ceil(distIso / step));
+      for (let i = 1; i <= steps; i++) {
+        this.stamp(
+          this.last.x + (du * i) / steps,
+          this.last.y + (dv * i) / steps,
+          rIso,
+          this.erasing,
+          isSoft
+        );
+      }
+    }
+    this.last = { x: u, y: v };
   }
 
   endStroke() {
     if (!this.isDrawing) return;
-
-    // Finish final half-segment right up to exact release coordinate (zero tail cut-off!)
-    if (this.edge === 'sharp') {
-      const ctx = this.strokeCtx;
-      ctx.save();
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = this.activeMaskRadius * 2;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.beginPath();
-      ctx.moveTo(this.lastMidX, this.lastMidY);
-      ctx.lineTo(this.lastRawX, this.lastRawY);
-      ctx.stroke();
-      ctx.restore();
-    } else if (Math.hypot(this.lastRawX - this.lastStampX, this.lastRawY - this.lastStampY) > 1.0) {
-      this._stampSoft(this.lastRawX, this.lastRawY);
+    if (this.lastRaw && this.last) {
+      this._stampSegment(this.lastRaw.x, this.lastRaw.y, this.pendingS);
     }
-
-    this.isDrawing = false;
-
-    if (this.preStrokeImage) {
-      this.undoStack.push(this.preStrokeImage);
+    if (this.preStrokeSnap) {
+      this.undoStack.push({ img: this.preStrokeSnap, painted: this.preStrokePainted });
       if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
       this.redoStack.length = 0;
-      this.preStrokeImage = null;
+      this.preStrokeSnap = null;
       this._emitHistory();
     }
-
-    this.maskCtx.save();
-    this.maskCtx.globalCompositeOperation = this.tool === 'eraser' ? 'destination-out' : 'source-over';
-    this.maskCtx.drawImage(this.strokeCanvas, 0, 0);
-    this.maskCtx.restore();
-    this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
-    this._previewDirty = true;
-
-    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
-  }
-
-  /** Cancel an active stroke losslessly (used when a 2nd finger initiates Pinch-Zoom!) */
-  cancelStroke() {
-    if (!this.isDrawing) return;
+    if (this.erasing) this._recheckPainted();
     this.isDrawing = false;
-    this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
-    this.preStrokeImage = null;
-    this._previewDirty = true;
+    this.last = null;
+    this.smooth = null;
+    this.lastRaw = null;
   }
 
-  /** Returns true if current stroke just started and looks like the first finger of a 2-finger pinch */
-  shouldCancelForPinch() {
-    if (!this.isDrawing) return false;
-    const elapsed = performance.now() - this.strokeStartTime;
-    return elapsed < 170 && this.strokeTravelPx < 22;
-  }
-
-  _stampPoint(x, y) {
-    if (this.edge === 'sharp') {
-      const ctx = this.strokeCtx;
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath();
-      ctx.arc(x, y, this.activeMaskRadius, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      this._stampSoft(x, y);
+  /** Exact original lossless cancelStroke when a 2nd finger starts 2-finger zoom/pan! */
+  cancelStroke() {
+    if (this.preStrokeSnap) {
+      this.ctx.putImageData(this.preStrokeSnap, 0, 0);
+      this.painted = this.preStrokePainted;
+      this.preStrokeSnap = null;
+      this.invalidate();
     }
+    this.isDrawing = false;
+    this.last = null;
+    this.smooth = null;
+    this.lastRaw = null;
   }
 
-  _stampSoft(x, y) {
-    const ctx = this.strokeCtx;
-    const r = this.activeMaskRadius;
-    const grad = ctx.createRadialGradient(x, y, r * 0.20, x, y, r);
-    grad.addColorStop(0, 'rgba(255, 255, 255, 1)');
-    grad.addColorStop(0.65, 'rgba(255, 255, 255, 0.72)');
-    grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  /**
-   * Build the Spotlight-Reveal preview canvas:
-   * - Unpainted artwork pixels: gently frosted with a warm pastel wash (light) or soft dim veil (dark)
-   * - Painted artwork pixels: 100% vivid, crystal-clear original artwork shines through!
-   * - Painted transparent background pixels: soft rose-pink cloud so you always see overpainting.
-   */
-  getPreviewCanvas(theme = 'light') {
-    if (!this._previewDirty && this._lastTheme === theme) {
-      return this.previewCanvas;
+  /** Fast blurred mask sampler for Play mode physics (u, v in [0, 1]) -> [0..1] */
+  sampleBlurred = (u, v) => {
+    if (!this.data) {
+      this.ensureBlur();
+      this.data = this.blurCtx.getImageData(0, 0, this.blurCanvas.width, this.blurCanvas.height);
     }
-    this._lastTheme = theme;
-
-    const S = this.maskSize;
-
-    // 1. Combined current squishy mask (committed mask + live stroke)
-    const cctx = this.combinedCtx;
-    cctx.clearRect(0, 0, S, S);
-    cctx.globalCompositeOperation = 'source-over';
-    cctx.drawImage(this.maskCanvas, 0, 0);
-    if (this.isDrawing) {
-      cctx.globalCompositeOperation = this.tool === 'eraser' ? 'destination-out' : 'source-over';
-      cctx.drawImage(this.strokeCanvas, 0, 0);
-    }
-    cctx.globalCompositeOperation = 'source-over';
-
-    // 2. Frosted Veil over UNPAINTED artwork pixels (lifted wherever painted!)
-    const vctx = this.veilCtx;
-    vctx.clearRect(0, 0, S, S);
-    vctx.globalCompositeOperation = 'source-over';
-    vctx.drawImage(this.artAlphaCanvas, 0, 0);
-    vctx.globalCompositeOperation = 'source-in';
-    vctx.fillStyle = theme === 'dark'
-      ? 'rgba(23, 21, 31, 0.62)'
-      : 'rgba(255, 245, 248, 0.64)';
-    vctx.fillRect(0, 0, S, S);
-    // Punch out painted squishy areas so original bright artwork shines through!
-    vctx.globalCompositeOperation = 'destination-out';
-    vctx.drawImage(this.combinedCanvas, 0, 0);
-    vctx.globalCompositeOperation = 'source-over';
-
-    // 3. Soft Rose-Pink Tint ONLY on painted pixels OUTSIDE the artwork silhouette
-    const octx = this.outsideTintCtx;
-    octx.clearRect(0, 0, S, S);
-    octx.globalCompositeOperation = 'source-over';
-    octx.drawImage(this.combinedCanvas, 0, 0);
-    octx.globalCompositeOperation = 'destination-out';
-    octx.drawImage(this.artAlphaCanvas, 0, 0);
-    octx.globalCompositeOperation = 'source-in';
-    octx.fillStyle = theme === 'dark'
-      ? 'rgba(244, 123, 162, 0.34)'
-      : 'rgba(242, 132, 164, 0.28)';
-    octx.fillRect(0, 0, S, S);
-    octx.globalCompositeOperation = 'source-over';
-
-    // 4. Composite final overlay cleanly into previewCanvas
-    const pctx = this.previewCtx;
-    pctx.clearRect(0, 0, S, S);
-    pctx.drawImage(this.veilCanvas, 0, 0);
-    pctx.drawImage(this.outsideTintCanvas, 0, 0);
-
-    this._previewDirty = false;
-    return this.previewCanvas;
-  }
+    const { data, width: w, height: h } = this.data;
+    const ix = Math.min(w - 1, Math.max(0, Math.round(u * (w - 1))));
+    const iy = Math.min(h - 1, Math.max(0, Math.round(v * (h - 1))));
+    return data[(iy * w + ix) * 4] / 255;
+  };
 }

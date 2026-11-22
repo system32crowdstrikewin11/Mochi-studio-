@@ -42,5 +42,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🍡 Mochi Studio v16 running at http://localhost:${PORT}`);
+  console.log(`🍡 Mochi Studio v17 running at http://localhost:${PORT}`);
 });

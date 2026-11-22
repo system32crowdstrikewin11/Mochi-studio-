@@ -5,6 +5,8 @@ in vec2 vUV;
 in float vStrain;
 
 uniform sampler2D uTex;     // premultiplied alpha artwork
+uniform sampler2D uMask;    // R8 mask (unblurred in Paint mode, blurred in Play mode)
+uniform float uMaskView;    // 1 = Paint mode quantized pink mask overlay
 uniform float uPass;        // 0 = opaque depth-write pass (a >= 0.95), 1 = soft fringe blend pass (a < 0.95)
 uniform vec2 uTexSize;
 uniform float uBicubic;     // 1 = bicubic B-spline sampling when zoomed in (> 1.05x)
@@ -44,13 +46,19 @@ vec4 sampleImage(vec2 uv) {
 
 void main() {
     vec4 c = sampleImage(vUV);
-    if (uPass < 0.5) {
+    if (uMaskView > 0.5) {
+        float m = texture(uMask, vUV).r;
+        // Exact original 4-step quantized mask view: Soft shows concentric rings, Sharp shows a crisp edge
+        float mq = floor(m * 4.0 + 0.5) / 4.0;
+        c *= 0.45 + 0.4 * mq;
+        c += vec4(1.0, 0.55, 0.68, 1.0) * (0.35 * mq);
+    } else if (uPass < 0.5) {
         if (c.a < 0.95) discard;
     } else {
         if (c.a < 0.004 || c.a >= 0.95) discard;
     }
 
-    if (uShading > 0.5) {
+    if (uMaskView < 0.5 && uShading > 0.5) {
         float s = clamp(vStrain, -1.0, 1.0);
         if (s > 0.0) {
             c.rgb = mix(c.rgb, vec3(c.a, c.a * 0.995, c.a * 0.99), s * 0.08);

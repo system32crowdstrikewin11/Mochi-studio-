@@ -1,9 +1,9 @@
 /**
- * Mochi Studio v16 — Main Application Controller
+ * Mochi Studio v17 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
+ * - Exact 1:1 Original Aspect-Matched Brush Tool (Hard/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original Synthesized Web Audio (Grab puff + Wobble-synced Release boing)
- * - Zero-Lag Spotlight-Reveal Brush (Sharp / Soft, Undo / Redo, Zoom-adaptive Size)
- * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint & Play Modes
+ * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint & Play Modes + Undo / Redo
  * - Optional Phone Motion Sensors (Tilt gravity + Shake jiggle) + Virtual Tilt Pad
  * - Direct Engine Video Recording (60 / 90 / 120 / Custom FPS) & Optional High-FPS GIF (up to 60 FPS)
  */
@@ -18,7 +18,7 @@ import { BrushEngine } from './brush-engine.js';
 import { MotionSensorManager } from './motion-sensors.js';
 import { SquishAudio } from './audio-squish.js';
 import { EngineRecorder } from './engine-recorder.js';
-import { getSample, fullSquishyMask } from './samples.js';
+import { getSample } from './samples.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,7 +30,8 @@ const state = {
   // Active pointers: Map<pointerId, { clientX, clientY, prevIsoX, prevIsoY, currIsoX, currIsoY, role, pointerType }>
   activeTouches: new Map(),
   pinchState: null,
-  sizePreviewTimer: null,
+  brushPreviewTimer: 0,
+  cursorVisible: false,
 
   // Direct Engine Recording config & fixed-timestep accumulator
   recordFormat: 'video',     // 'video' | 'gif'
@@ -48,6 +49,9 @@ const physics = new MochiPhysicsContinuum();
 const glCanvas = $('glCanvas');
 const overlayCanvas = $('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
+const stageWrap = $('stageWrap');
+const brushCursorEl = $('brushCursor');
+const brushPreviewEl = $('brushPreview');
 const renderer = new MochiRendererWebGL2(glCanvas, physics);
 const brush = new BrushEngine(512);
 const motion = new MotionSensorManager();
@@ -71,6 +75,55 @@ function showToast(msg, duration = 2600) {
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add('hidden'), duration);
+}
+
+// ============================================================================
+// Exact 1:1 Original Brush Cursor & Center Preview Sizing
+// ============================================================================
+function updateBrushCursorSize() {
+  const diam = renderer.isoToCssLength(brush.brushRadius * physics.S) * 2;
+  brushCursorEl.style.width = `${diam}px`;
+  brushCursorEl.style.height = `${diam}px`;
+  brushPreviewEl.style.width = `${diam}px`;
+  brushPreviewEl.style.height = `${diam}px`;
+}
+
+function updateBrushCursorClasses() {
+  const isSoft = brush.brushType === 'soft';
+  const isEraser = brush.erasing;
+  brushCursorEl.classList.toggle('soft', isSoft && !isEraser);
+  brushPreviewEl.classList.toggle('soft', isSoft && !isEraser);
+  brushCursorEl.classList.toggle('eraser', isEraser);
+  brushPreviewEl.classList.toggle('eraser', isEraser);
+}
+
+function showBrushPreview(duration = 800) {
+  if (state.step !== 'paint') return;
+  updateBrushCursorSize();
+  updateBrushCursorClasses();
+  brushPreviewEl.classList.remove('hidden');
+  brushCursorEl.classList.add('hidden');
+  clearTimeout(state.brushPreviewTimer);
+  state.brushPreviewTimer = setTimeout(() => hideBrushPreview(), duration);
+}
+
+function hideBrushPreview() {
+  clearTimeout(state.brushPreviewTimer);
+  brushPreviewEl.classList.add('hidden');
+  if (state.step === 'paint' && state.cursorVisible && !state.pinchState) {
+    brushCursorEl.classList.remove('hidden');
+  }
+}
+
+function moveBrushCursor(clientX, clientY) {
+  const rect = stageWrap.getBoundingClientRect();
+  brushCursorEl.style.left = `${clientX - rect.left}px`;
+  brushCursorEl.style.top = `${clientY - rect.top}px`;
+  updateBrushCursorSize();
+  state.cursorVisible = true;
+  if (state.step === 'paint' && brushPreviewEl.classList.contains('hidden') && !state.pinchState) {
+    brushCursorEl.classList.remove('hidden');
+  }
 }
 
 // ============================================================================
@@ -98,11 +151,14 @@ function setStep(nextStep) {
   state.pinchState = null;
   brush.cancelStroke();
   physics.resetPose();
+  state.cursorVisible = false;
+  brushCursorEl.classList.add('hidden');
+  brushPreviewEl.classList.add('hidden');
 
   if (nextStep === 'paint') {
     $('motionHud').classList.add('hidden');
-    brush.markPreviewDirty();
-    showCenterBrushPreview(1100);
+    brush.dirty = true;
+    showBrushPreview(900);
   } else if (nextStep === 'play') {
     if (!brush.hasAnyPaint()) {
       physics.maskEnabled = false;
@@ -112,9 +168,8 @@ function setStep(nextStep) {
       state._suppressEmptyToast = false;
     } else {
       physics.maskEnabled = true;
-      renderer.uploadMask(brush.getBlurredMaskCanvas());
+      renderer.uploadMask(brush.textureSource());
     }
-    brush.cursor.visible = false;
     updateMotionHud();
   }
 }
@@ -130,13 +185,12 @@ function loadArtwork(imgOrCanvas) {
 
   physics.setAspect(aspect);
   physics.updateArtworkAlphaSampler(imgOrCanvas);
-  brush.setArtworkSource(imgOrCanvas);
+  brush.setup(aspect);
   renderer.uploadTexture(imgOrCanvas);
+  renderer.uploadMask(brush.canvas);
   renderer.resetView();
-
-  brush.resetHistory();
-  brush.clear(false);
   physics.maskEnabled = false;
+  updateBrushCursorSize();
 }
 
 function selectSample(key, goStep = null, silentToast = false) {
@@ -201,6 +255,7 @@ function startTwoFingerPinch() {
     anchorIsoX: anchorIso.x,
     anchorIsoY: anchorIso.y,
   };
+  brushCursorEl.classList.add('hidden');
 }
 
 function updateTwoFingerPinch() {
@@ -214,44 +269,14 @@ function updateTwoFingerPinch() {
   const newZoom = state.pinchState.startZoom * (dist / state.pinchState.startDist);
   const midPx = renderer.canvasPxFromClient(midClientX, midClientY);
   renderer.setViewAnchored(newZoom, state.pinchState.anchorIsoX, state.pinchState.anchorIsoY, midPx.x, midPx.y);
+  updateBrushCursorSize();
 }
 
-/** Convert current screen-space brush radius (CSS px) into mask-canvas pixels for zoom-adaptive precision */
-function getCurrentMaskRadius() {
-  const topLeft = renderer.screenFromIso(0, 0);
-  const botRight = renderer.screenFromIso(renderer.aspect, 1);
-  const drawW = Math.max(24, botRight.x - topLeft.x);
-  return (brush.screenRadius / drawW) * brush.maskSize;
-}
-
-function showCenterBrushPreview(duration = 700) {
-  clearTimeout(state.sizePreviewTimer);
-  brush.cursor = {
-    visible: state.step === 'paint',
-    x: renderer.cssWidth * 0.5,
-    y: renderer.cssHeight * 0.44,
-    screenRadius: brush.screenRadius,
-    isSizePreview: true,
-  };
-  if (duration > 0) {
-    state.sizePreviewTimer = setTimeout(() => {
-      if (brush.cursor.isSizePreview && !brush.isDrawing) {
-        brush.cursor.visible = false;
-      }
-    }, duration);
-  }
-}
-
-function updateBrushCursor(clientX, clientY) {
-  clearTimeout(state.sizePreviewTimer);
-  const rect = glCanvas.getBoundingClientRect();
-  brush.cursor = {
-    visible: state.step === 'paint' && state.activeTouches.size <= 1,
-    x: clientX - rect.left,
-    y: clientY - rect.top,
-    screenRadius: brush.screenRadius,
-    isSizePreview: false,
-  };
+function paintAt(clientX, clientY) {
+  const iso = renderer.isoFromClient(clientX, clientY);
+  const uv = renderer.restUvFromIso(iso.x, iso.y);
+  // Paint strictly centered at cursor UV (no edge clamping distortion!)
+  brush.strokeTo(uv.x, uv.y, physics.S);
 }
 
 // ============================================================================
@@ -285,30 +310,24 @@ glCanvas.addEventListener('pointerdown', (e) => {
     return;
   }
 
-  // PAINT MODE — Instant zero-lag stroke start + lossless 2-finger pinch cancellation
+  // PAINT MODE — Exact original 1-finger paint + lossless 2-finger pinch cancellation
+  if (!brushPreviewEl.classList.contains('hidden')) hideBrushPreview();
   state.activeTouches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY, role: 'paint' });
 
-  if (state.activeTouches.size >= 2) {
-    if (brush.isDrawing) {
-      if (brush.shouldCancelForPinch()) {
-        brush.cancelStroke();
-      } else {
-        brush.endStroke();
-      }
-    }
-    brush.cursor.visible = false;
+  if (state.activeTouches.size === 1 && !state.pinchState) {
+    brush.beginStroke();
+    moveBrushCursor(e.clientX, e.clientY);
+    paintAt(e.clientX, e.clientY);
+  } else if (state.activeTouches.size >= 2 && !state.pinchState) {
+    brush.cancelStroke();
     startTwoFingerPinch();
-    return;
   }
-
-  updateBrushCursor(e.clientX, e.clientY);
-  const uv = renderer.restUvFromIso(iso.x, iso.y);
-  const m = brush.uvToMask(Math.min(1, Math.max(0, uv.x)), Math.min(1, Math.max(0, uv.y)));
-  brush.beginStroke(m.x, m.y, getCurrentMaskRadius());
 });
 
 glCanvas.addEventListener('pointermove', (e) => {
-  if (state.step === 'paint') updateBrushCursor(e.clientX, e.clientY);
+  if (state.step === 'paint' && !state.pinchState) {
+    moveBrushCursor(e.clientX, e.clientY);
+  }
 
   const rec = state.activeTouches.get(e.pointerId);
   if (!rec) return;
@@ -332,7 +351,7 @@ glCanvas.addEventListener('pointermove', (e) => {
   }
 
   if (state.step === 'paint') {
-    if (state.activeTouches.size >= 2) {
+    if (state.pinchState) {
       updateTwoFingerPinch();
       return;
     }
@@ -340,11 +359,7 @@ glCanvas.addEventListener('pointermove', (e) => {
       const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
       const list = events && events.length > 0 ? events : [e];
       for (let i = 0; i < list.length; i++) {
-        const ce = list[i];
-        const cIso = renderer.isoFromClient(ce.clientX, ce.clientY);
-        const uv = renderer.restUvFromIso(cIso.x, cIso.y);
-        const cm = brush.uvToMask(Math.min(1, Math.max(0, uv.x)), Math.min(1, Math.max(0, uv.y)));
-        brush.moveStroke(cm.x, cm.y);
+        paintAt(list[i].clientX, list[i].clientY);
       }
     }
   }
@@ -368,14 +383,17 @@ function handlePointerEnd(e) {
   }
 
   if (state.step === 'paint') {
-    if (brush.isDrawing && state.activeTouches.size === 0) {
+    if (!state.pinchState && brush.isDrawing && state.activeTouches.size === 0) {
       brush.endStroke();
     }
-    if (state.activeTouches.size === 0 && e.pointerType === 'touch') {
-      brush.cursor.visible = false;
-    }
-    if (state.activeTouches.size < 2) {
+    if (state.activeTouches.size === 0) {
       state.pinchState = null;
+      if (e.pointerType === 'touch') {
+        state.cursorVisible = false;
+        brushCursorEl.classList.add('hidden');
+      } else if (state.cursorVisible && brushPreviewEl.classList.contains('hidden')) {
+        brushCursorEl.classList.remove('hidden');
+      }
     }
   }
 }
@@ -383,7 +401,10 @@ function handlePointerEnd(e) {
 glCanvas.addEventListener('pointerup', handlePointerEnd);
 glCanvas.addEventListener('pointercancel', handlePointerEnd);
 glCanvas.addEventListener('pointerleave', () => {
-  if (state.activeTouches.size === 0) brush.cursor.visible = false;
+  if (state.activeTouches.size === 0) {
+    state.cursorVisible = false;
+    brushCursorEl.classList.add('hidden');
+  }
 });
 
 // Desktop wheel zoom anchored directly under mouse cursor
@@ -394,10 +415,11 @@ glCanvas.addEventListener('wheel', (e) => {
   const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
   const px = renderer.canvasPxFromClient(e.clientX, e.clientY);
   renderer.setViewAnchored(renderer.zoom * factor, anchorIso.x, anchorIso.y, px.x, px.y);
+  updateBrushCursorSize();
 }, { passive: false });
 
 // ============================================================================
-// 2D Overlay Rendering (Paint Mask Spotlight-Reveal & Cursor Ring)
+// 2D Overlay Rendering (Desktop Pointer Ring in Play Mode)
 // ============================================================================
 function renderOverlay() {
   const w = renderer.cssWidth;
@@ -411,37 +433,7 @@ function renderOverlay() {
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   overlayCtx.clearRect(0, 0, w, h);
 
-  if (state.step === 'paint') {
-    const theme = document.documentElement.getAttribute('data-theme') || 'light';
-    const topLeft = renderer.screenFromIso(0, 0);
-    const botRight = renderer.screenFromIso(renderer.aspect, 1);
-    const drawW = botRight.x - topLeft.x;
-    const drawH = botRight.y - topLeft.y;
-    overlayCtx.imageSmoothingEnabled = true;
-    overlayCtx.drawImage(brush.getPreviewCanvas(theme), topLeft.x, topLeft.y, drawW, drawH);
-
-    if (brush.cursor.visible) {
-      const { x, y, screenRadius } = brush.cursor;
-      overlayCtx.save();
-      overlayCtx.beginPath();
-      overlayCtx.arc(x, y, screenRadius, 0, Math.PI * 2);
-      if (brush.tool === 'eraser') {
-        overlayCtx.strokeStyle = '#eb6b92';
-        overlayCtx.lineWidth = 1.8;
-        overlayCtx.setLineDash([5, 4]);
-        overlayCtx.stroke();
-        overlayCtx.fillStyle = 'rgba(255, 255, 255, 0.16)';
-        overlayCtx.fill();
-      } else {
-        overlayCtx.strokeStyle = '#eb6b92';
-        overlayCtx.lineWidth = 1.8;
-        overlayCtx.stroke();
-        overlayCtx.fillStyle = 'rgba(242, 132, 164, 0.14)';
-        overlayCtx.fill();
-      }
-      overlayCtx.restore();
-    }
-  } else if (state.step === 'play' && state.activeTouches.size > 0) {
+  if (state.step === 'play' && state.activeTouches.size > 0) {
     const rect = glCanvas.getBoundingClientRect();
     for (const pt of state.activeTouches.values()) {
       if (pt.pointerType !== 'mouse') continue;
@@ -467,7 +459,19 @@ function tick(now) {
   const dt = Math.min(0.05, Math.max(0.001, (now - state.lastFrameTime) / 1000));
   state.lastFrameTime = now;
 
-  if (state.step === 'play') {
+  // Upload mask texture whenever dirty (unblurred in Paint mode, blurred in Play mode!)
+  if (brush.dirty) {
+    renderer.uploadMask(state.step === 'paint' ? brush.canvas : brush.textureSource());
+    brush.dirty = false;
+  }
+
+  if (state.step === 'paint') {
+    renderer.render(true);
+    // Keep cursor ring synced smoothly during animated Reset View zoom transitions
+    if (Math.abs(renderer.zoom - renderer.targetZoom) > 0.001) {
+      updateBrushCursorSize();
+    }
+  } else if (state.step === 'play') {
     const f = motion.getCombinedForce();
     physics.setMotionForce(f.gx, f.gy, f.ax, f.ay);
 
@@ -484,7 +488,6 @@ function tick(now) {
       state.recAccum += dt;
 
       if (targetFps >= 45) {
-        // High-FPS Engine Lock (60 / 90 / 120 / Custom >= 45 FPS) with sub-frame finger interpolation
         let steps = Math.floor(state.recAccum / stepDt);
         if (steps > 8) {
           steps = 8;
@@ -504,7 +507,7 @@ function tick(now) {
               }
             }
             physics.step(stepDt);
-            renderer.render();
+            renderer.render(false);
             const res = recorder.pushEngineFrame(glCanvas, theme);
             if (res.limitReached) {
               stopRecordingFlow();
@@ -518,10 +521,9 @@ function tick(now) {
             }
           }
         } else {
-          renderer.render();
+          renderer.render(false);
         }
       } else {
-        // Lower-FPS Engine Capture (15/24/30 FPS GIF or <45 FPS Custom Video)
         for (const [pid, pt] of state.activeTouches.entries()) {
           if (pt.role === 'grab') {
             pt.prevIsoX = pt.currIsoX;
@@ -530,7 +532,7 @@ function tick(now) {
           }
         }
         physics.step(dt);
-        renderer.render();
+        renderer.render(false);
         let captures = Math.floor(state.recAccum / stepDt);
         if (captures > 3) {
           captures = 3;
@@ -554,10 +556,10 @@ function tick(now) {
       $('recTimer').textContent = `${mm}:${ss} • ${tag}`;
     } else {
       physics.step(dt);
-      renderer.render();
+      renderer.render(false);
     }
   } else {
-    renderer.render();
+    renderer.render(false);
   }
 
   renderOverlay();
@@ -744,7 +746,6 @@ function syncSlidersFromPhysics() {
 }
 
 function wireUI() {
-  // Unlock Web Audio cleanly on first user interaction (mobile Safari/Chrome requirement)
   const unlockAudio = () => audio.unlock();
   window.addEventListener('pointerup', unlockAudio, { once: true });
   window.addEventListener('touchend', unlockAudio, { once: true });
@@ -761,7 +762,6 @@ function wireUI() {
     html.setAttribute('data-theme', isDark ? 'light' : 'dark');
     $('iconMoon').classList.toggle('hidden', !isDark);
     $('iconSun').classList.toggle('hidden', isDark);
-    brush.markPreviewDirty();
   });
 
   // Reset View
@@ -786,7 +786,6 @@ function wireUI() {
     handleImageBlob(e.dataTransfer.files[0]);
   });
 
-  // Global Ctrl+V clipboard image paste
   window.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
@@ -798,28 +797,29 @@ function wireUI() {
     }
   });
 
-  // Step 2: Paint Controls
-  const setTool = (t) => {
-    brush.tool = t;
-    $('toolBrush').classList.toggle('active', t === 'brush');
-    $('toolEraser').classList.toggle('active', t === 'eraser');
-    showCenterBrushPreview(550);
+  // Step 2: Paint Controls (Exact 1:1 Original MaskTool bindings + Undo/Redo)
+  const setErasing = (erasing) => {
+    brush.erasing = erasing;
+    $('toolBrush').classList.toggle('active', !erasing);
+    $('toolEraser').classList.toggle('active', erasing);
+    showBrushPreview(700);
   };
-  $('toolBrush').addEventListener('click', () => setTool('brush'));
-  $('toolEraser').addEventListener('click', () => setTool('eraser'));
+  $('toolBrush').addEventListener('click', () => setErasing(false));
+  $('toolEraser').addEventListener('click', () => setErasing(true));
 
-  const setEdge = (edge) => {
-    brush.edge = edge;
-    $('edgeSharp').classList.toggle('active', edge === 'sharp');
-    $('edgeSoft').classList.toggle('active', edge === 'soft');
+  const setBrushType = (type) => {
+    brush.brushType = type; // 'hard' | 'soft'
+    $('edgeSharp').classList.toggle('active', type === 'hard');
+    $('edgeSoft').classList.toggle('active', type === 'soft');
+    showBrushPreview(800);
   };
-  $('edgeSharp').addEventListener('click', () => setEdge('sharp'));
-  $('edgeSoft').addEventListener('click', () => setEdge('soft'));
+  $('edgeSharp').addEventListener('click', () => setBrushType('hard'));
+  $('edgeSoft').addEventListener('click', () => setBrushType('soft'));
 
   $('brushSize').addEventListener('input', (e) => {
-    brush.screenRadius = Number(e.target.value);
+    brush.brushRadius = parseFloat(e.target.value);
     updateSliderFill(e.target);
-    showCenterBrushPreview(650);
+    showBrushPreview(800);
   });
 
   $('btnUndo').addEventListener('click', () => brush.undo());
@@ -829,9 +829,7 @@ function wireUI() {
     showToast('Cleared painted areas', 1800);
   });
   $('btnAllSquishy').addEventListener('click', () => {
-    if (!state.artworkSource) return;
-    const all = fullSquishyMask(state.artworkSource, 512);
-    brush.setMaskFromCanvas(all, true);
+    brush.fillAll(state.artworkSource, true);
     showToast('Made whole character squishy!', 1800);
   });
   $('btnDonePaint').addEventListener('click', () => setStep('play'));
@@ -839,9 +837,6 @@ function wireUI() {
   brush.onHistoryChange = (canUndo, canRedo) => {
     $('btnUndo').disabled = !canUndo;
     $('btnRedo').disabled = !canRedo;
-  };
-  brush.onMaskCommit = (blurredCanvas) => {
-    renderer.uploadMask(blurredCanvas);
   };
 
   // Step 3: Play Controls
@@ -880,7 +875,6 @@ function wireUI() {
   $('btnCloseSettings').addEventListener('click', () => openSettings(false));
   $('settingsBackdrop').addEventListener('click', () => openSettings(false));
 
-  // Collapsible Fine-tune
   $('btnFineTune').addEventListener('click', () => {
     const box = $('fineTuneBox');
     const willOpen = box.classList.contains('hidden');
@@ -890,7 +884,6 @@ function wireUI() {
     if (willOpen) refreshAllSliderFills();
   });
 
-  // Presets
   document.querySelectorAll('.preset-pill').forEach((pill) => {
     pill.addEventListener('click', () => {
       physics.applyPreset(pill.dataset.preset);
@@ -900,7 +893,6 @@ function wireUI() {
     });
   });
 
-  // Exact original Softness slider -> updates Stretch, Wobble speed, Wobbles automatically!
   $('optSoftness').addEventListener('input', (e) => {
     physics.setSoftness(parseFloat(e.target.value));
     syncSlidersFromPhysics();
@@ -921,16 +913,9 @@ function wireUI() {
   bindFloat('optPuffiness', (v) => physics.setParams({ bulge: v }));
   bindFloat('optMotion', (v) => physics.setParams({ motion: v }));
 
-  $('optMotionTilt').addEventListener('change', (e) => {
-    motion.tiltEnabled = e.target.checked;
-  });
-  $('optMotionShake').addEventListener('change', (e) => {
-    motion.shakeEnabled = e.target.checked;
-  });
-
-  $('optShading').addEventListener('change', (e) => {
-    renderer.shadingEnabled = e.target.checked;
-  });
+  $('optMotionTilt').addEventListener('change', (e) => { motion.tiltEnabled = e.target.checked; });
+  $('optMotionShake').addEventListener('change', (e) => { motion.shakeEnabled = e.target.checked; });
+  $('optShading').addEventListener('change', (e) => { renderer.shadingEnabled = e.target.checked; });
   $('optVpad').addEventListener('change', (e) => setVirtualPadOpen(e.target.checked));
   $('btnTestJiggle').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
@@ -975,7 +960,6 @@ function wireUI() {
   $('recModeVideo').addEventListener('click', () => setRecMode('video'));
   $('recModeGif').addEventListener('click', () => setRecMode('gif'));
 
-  // Video FPS preset pills (60 / 90 / 120 / Custom)
   document.querySelectorAll('#videoFpsPills .fps-pill').forEach((pill) => {
     pill.addEventListener('click', () => {
       state.videoFpsMode = pill.dataset.fps;
@@ -997,7 +981,6 @@ function wireUI() {
   $('optCustomFps').addEventListener('input', (e) => setCustomVideoFps(e.target.value));
   $('numCustomFps').addEventListener('change', (e) => setCustomVideoFps(e.target.value));
 
-  // Optional High-FPS GIF controls (up to 60 FPS)
   $('optGifHighFps').addEventListener('change', (e) => {
     state.gifHighFpsEnabled = e.target.checked;
     $('gifFpsRow').classList.toggle('hidden', !state.gifHighFpsEnabled);
@@ -1022,7 +1005,10 @@ function wireUI() {
   $('optGifFps').addEventListener('input', (e) => setGifFps(e.target.value));
   updateGifNote();
 
-  window.addEventListener('resize', () => renderer.resize());
+  window.addEventListener('resize', () => {
+    renderer.resize();
+    updateBrushCursorSize();
+  });
 }
 
 // ============================================================================

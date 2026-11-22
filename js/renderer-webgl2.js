@@ -1,5 +1,5 @@
 /**
- * MochiRendererWebGL2 v16 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
+ * MochiRendererWebGL2 v17 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
  *
  * - Builds a dense 128..192 segment WebGL2 mesh (matching original meshShortSegs=128, meshMaxSegs=192)
  * - Runs all quintic falloff, ring bulge, 4-tap mask smoothing, depth-lift, and bicubic sampling
@@ -49,6 +49,8 @@ precision mediump float;
 in vec2 vUV;
 in float vStrain;
 uniform sampler2D uTex;
+uniform sampler2D uMask;
+uniform float uMaskView;
 uniform float uPass;
 uniform vec2 uTexSize;
 uniform float uBicubic;
@@ -58,8 +60,10 @@ vec4 cubicW(float v){vec4 n=vec4(1.0,2.0,3.0,4.0)-v;vec4 s=n*n*n;float x=s.x;flo
 vec4 sampleImage(vec2 uv){if(uBicubic<0.5)return texture(uTex,uv);vec2 inv=1.0/uTexSize;vec2 coord=uv*uTexSize-0.5;vec2 fxy=fract(coord);coord-=fxy;vec4 xc=cubicW(fxy.x);vec4 yc=cubicW(fxy.y);vec4 c=coord.xxyy+vec2(-0.5,1.5).xyxy;vec4 s=vec4(xc.xz+xc.yw,yc.xz+yc.yw);vec4 off=(c+vec4(xc.yw,yc.yw)/s)*inv.xxyy;vec4 s0=texture(uTex,off.xz);vec4 s1=texture(uTex,off.yz);vec4 s2=texture(uTex,off.xw);vec4 s3=texture(uTex,off.yw);float sx=s.x/(s.x+s.y);float sy=s.z/(s.z+s.w);return mix(mix(s3,s2,sx),mix(s1,s0,sx),sy);}
 void main(){
   vec4 c=sampleImage(vUV);
-  if(uPass<0.5){if(c.a<0.95)discard;}else{if(c.a<0.004||c.a>=0.95)discard;}
-  if(uShading>0.5){float s=clamp(vStrain,-1.0,1.0);if(s>0.0)c.rgb=mix(c.rgb,vec3(c.a,c.a*0.995,c.a*0.99),s*0.08);else if(s<0.0)c.rgb=mix(c.rgb,c.rgb*vec3(0.96,0.91,0.93),(-s)*0.10);}
+  if(uMaskView>0.5){float m=texture(uMask,vUV).r;float mq=floor(m*4.0+0.5)/4.0;c*=0.45+0.4*mq;c+=vec4(1.0,0.55,0.68,1.0)*(0.35*mq);}
+  else if(uPass<0.5){if(c.a<0.95)discard;}
+  else{if(c.a<0.004||c.a>=0.95)discard;}
+  if(uMaskView<0.5&&uShading>0.5){float s=clamp(vStrain,-1.0,1.0);if(s>0.0)c.rgb=mix(c.rgb,vec3(c.a,c.a*0.995,c.a*0.99),s*0.08);else if(s<0.0)c.rgb=mix(c.rgb,c.rgb*vec3(0.96,0.91,0.93),(-s)*0.10);}
   outColor=c;
 }`;
 
@@ -132,7 +136,7 @@ export class MochiRendererWebGL2 {
     const names = [
       'uAspect', 'uView', 'uGrabCount', 'uGrabA', 'uGrabPull', 'uBulge',
       'uMotionDisp', 'uMask', 'uMaskEnabled', 'uMaskCell',
-      'uTex', 'uPass', 'uTexSize', 'uBicubic', 'uShading',
+      'uTex', 'uMaskView', 'uPass', 'uTexSize', 'uBicubic', 'uShading',
     ];
     for (const n of names) {
       this.u[n] = gl.getUniformLocation(this.program, n);
@@ -346,6 +350,12 @@ export class MochiRendererWebGL2 {
     return { x: isoX / this.aspect, y: isoY };
   }
 
+  /** Exact screen CSS length for an isotropic distance (guarantees 1:1 cursor-to-paint match!) */
+  isoToCssLength(isoLen) {
+    const rect = this.canvas.getBoundingClientRect();
+    return isoLen * this.k * this.zoom * (rect.width / Math.max(1, this.canvasW));
+  }
+
   resetView() {
     this.targetZoom = 1.0;
     this.targetTx = 0.0;
@@ -362,7 +372,7 @@ export class MochiRendererWebGL2 {
     this.ty = this.targetTy = pxY - basePxY * z;
   }
 
-  render() {
+  render(maskView = false) {
     const gl = this.gl;
     if (!gl) return;
 
@@ -379,12 +389,13 @@ export class MochiRendererWebGL2 {
 
     gl.uniform1f(u.uAspect, this.aspect);
     gl.uniformMatrix3fv(u.uView, false, this._computeViewMatrix());
-    gl.uniform1i(u.uGrabCount, uni.grabCount);
+    gl.uniform1i(u.uGrabCount, maskView ? 0 : uni.grabCount);
     gl.uniform4fv(u.uGrabA, uni.grabA);
     gl.uniform2fv(u.uGrabPull, uni.grabPull);
     gl.uniform1f(u.uBulge, uni.bulge);
-    gl.uniform2f(u.uMotionDisp, uni.motionX, uni.motionY);
+    gl.uniform2f(u.uMotionDisp, maskView ? 0 : uni.motionX, maskView ? 0 : uni.motionY);
     gl.uniform1f(u.uMaskEnabled, uni.maskEnabled ? 1.0 : 0.0);
+    gl.uniform1f(u.uMaskView, maskView ? 1.0 : 0.0);
     gl.uniform2f(u.uMaskCell, 1 / this.mesh.segsX, 1 / this.mesh.segsY);
 
     gl.uniform2f(u.uTexSize, this.imageW, this.imageH);
@@ -402,17 +413,24 @@ export class MochiRendererWebGL2 {
 
     gl.bindVertexArray(this.mesh.vao);
 
-    // Exact 2-pass depth-tested alpha draw:
-    // Pass 0: opaque pixels write depth (pulled cheeks overlap cleanly in front!)
-    gl.uniform1f(u.uPass, 0.0);
-    gl.depthMask(true);
-    gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
+    if (maskView) {
+      // Exact original single-pass Paint mode render with GPU quantized mask overlay
+      gl.uniform1f(u.uPass, 0.0);
+      gl.depthMask(true);
+      gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
+    } else {
+      // Exact 2-pass depth-tested alpha draw:
+      // Pass 0: opaque pixels write depth (pulled cheeks overlap cleanly in front!)
+      gl.uniform1f(u.uPass, 0.0);
+      gl.depthMask(true);
+      gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
 
-    // Pass 1: semi-transparent anti-aliased edge fringe blends cleanly without punching depth holes
-    gl.uniform1f(u.uPass, 1.0);
-    gl.depthMask(false);
-    gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
-    gl.depthMask(true);
+      // Pass 1: semi-transparent anti-aliased edge fringe blends cleanly without punching depth holes
+      gl.uniform1f(u.uPass, 1.0);
+      gl.depthMask(false);
+      gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
+      gl.depthMask(true);
+    }
 
     gl.bindVertexArray(null);
   }
