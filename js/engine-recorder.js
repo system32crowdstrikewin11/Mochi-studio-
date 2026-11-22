@@ -1,18 +1,17 @@
 /**
- * EngineRecorder — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS) & Optional High-FPS GIF Recorder
+ * EngineRecorder v18 — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS)
+ * & Adaptive 256-Color Web Worker GIF (Default 15 FPS, Optional up to 60 FPS)
  *
- * Pulls frames directly from the physics + WebGL2 rendering engine rather than the screen:
- * 1. Video mode (Primary): WebCodecs VideoEncoder + MiniWebmMuxer
- *    - Stamps every frame with mathematically exact engine timestamps (frameIndex * 1e6 / fps)
- *      so 60, 90, 120, or Custom FPS videos play back at true target FPS even on a 60Hz display!
- *    - Composites clean pastel/dark polka-dot studio background + WebGL2 artwork (zero UI overlays).
- * 2. Video mode (Automatic Fallback): Engine-composited MediaRecorder (captureStream(0) + requestFrame)
- *    for browsers without WebCodecs VideoEncoder.
- * 3. GIF mode: Incremental high-speed MiniGifEncoder supporting default 15 FPS or optional up to 60 FPS!
+ * - Video (Primary): WebCodecs VideoEncoder + MiniWebmMuxer with exact 0.1ms engine timestamps
+ * - Video (Fallback): MediaRecorder (prefers MP4/H.264 on Safari/iOS, VP9/VP8 WebM elsewhere)
+ * - GIF (Primary): Captures clean composited RGBA buffers directly from the engine and encodes
+ *   in `js/gif-worker.js` using adaptive per-frame 256-color quantization + LZW off the main thread!
+ * - GIF (Fallback): Incremental MiniGifEncoder if Web Workers are blocked.
+ * - Returns a ready-to-preview `File` object for the Recording Preview Modal & OS Share Sheet!
  */
 
-import { MiniWebmMuxer } from './webm-muxer.js';
-import { MiniGifEncoder } from './gif-encoder.js';
+import { MiniWebmMuxer } from './webm-muxer.js?v=18';
+import { MiniGifEncoder } from './gif-encoder.js?v=18';
 
 function makeEven(n, minVal = 64) {
   const v = Math.max(minVal, Math.round(n));
@@ -25,12 +24,10 @@ export class EngineRecorder {
     this.format = 'video'; // 'video' | 'gif'
     this.fps = 60;
     this.frameIndex = 0;
-    this.backend = 'none'; // 'webcodecs' | 'mediarecorder' | 'gif'
+    this.backend = 'none'; // 'webcodecs' | 'mediarecorder' | 'gif-worker' | 'gif-fallback'
 
-    // Offscreen studio compositor canvas (clean polka-dot backdrop + WebGL2 mesh)
     this.compCanvas = document.createElement('canvas');
     this.compCtx = this.compCanvas.getContext('2d', { willReadFrequently: false });
-    this._bgPatternCanvas = null;
     this._bgTheme = null;
     this._bgPattern = null;
 
@@ -43,9 +40,12 @@ export class EngineRecorder {
     this.mediaRecorder = null;
     this.mrChunks = [];
     this.mrTrack = null;
+    this.mrExt = 'webm';
+    this.mrMime = 'video/webm';
     this._mrStopResolve = null;
 
     // GIF state
+    this.gifFrames = []; // ArrayBuffer[] for Web Worker
     this.gifEncoder = null;
     this.gifMaxFrames = 90;
   }
@@ -67,7 +67,6 @@ export class EngineRecorder {
     pctx.arc(tile * 0.5, tile * 0.5, Math.max(1.6, 3 * scale), 0, Math.PI * 2);
     pctx.fill();
 
-    this._bgPatternCanvas = p;
     this._bgPattern = this.compCtx.createPattern(p, 'repeat');
   }
 
@@ -96,35 +95,43 @@ export class EngineRecorder {
     const aspect = cssW / cssH;
 
     // ------------------------------------------------------------------
-    // GIF MODE (Default 15 FPS, Optional up to 60 FPS!)
+    // GIF MODE — Adaptive 256-Color Web Worker (15 FPS default, up to 60 FPS!)
     // ------------------------------------------------------------------
     if (format === 'gif') {
-      const targetW = this.fps > 30 ? 256 : 320;
-      const w = makeEven(targetW, 128);
-      const h = makeEven(w / aspect, 128);
+      // Crisp 440px max side at classic/30fps, 340px at 50-60fps for fast Worker encoding
+      const maxSide = this.fps > 30 ? 340 : 440;
+      const w = aspect >= 1 ? makeEven(maxSide, 128) : makeEven(maxSide * aspect, 128);
+      const h = aspect >= 1 ? makeEven(maxSide / aspect, 128) : makeEven(maxSide, 128);
       this.compCanvas.width = w;
       this.compCanvas.height = h;
       this.compCtx = this.compCanvas.getContext('2d', { willReadFrequently: true });
       this._bgTheme = null;
 
-      this.gifEncoder = new MiniGifEncoder(w, h, this.fps);
       const maxSecs = this.fps > 30 ? 4 : 6;
       this.gifMaxFrames = Math.round(this.fps * maxSecs);
-      this.backend = 'gif';
+      this.gifFrames = [];
+      this.gifEncoder = null;
+
+      if (typeof Worker === 'function') {
+        this.backend = 'gif-worker';
+      } else {
+        this.gifEncoder = new MiniGifEncoder(w, h, this.fps);
+        this.backend = 'gif-fallback';
+      }
+
       this.isRecording = true;
       return {
-        backend: 'gif',
+        backend: this.backend,
         fps: this.fps,
         maxSeconds: maxSecs,
-        message: `Recording ${this.fps} FPS GIF directly from engine...`,
+        message: `Recording ${this.fps} FPS GIF (up to ${maxSecs}s)...`,
       };
     }
 
     // ------------------------------------------------------------------
     // VIDEO MODE (60 / 90 / 120 / Custom FPS directly from engine!)
     // ------------------------------------------------------------------
-    // Smart even dimensions (capped at 1080 longest side for silky 120fps+ encoding on mobile)
-    const maxLong = this.fps > 90 ? 960 : 1080;
+    const maxLong = this.fps > 90 ? 960 : 1280;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     let rawW = cssW * dpr;
     let rawH = cssH * dpr;
@@ -141,7 +148,6 @@ export class EngineRecorder {
     this.compCtx = this.compCanvas.getContext('2d', { willReadFrequently: false });
     this._bgTheme = null;
 
-    // Try WebCodecs VideoEncoder first for mathematically exact engine FPS (60/90/120/Custom)!
     if (typeof VideoEncoder === 'function' && typeof VideoFrame === 'function') {
       const bitrate = Math.min(20000000, Math.max(2500000, Math.round(w * h * this.fps * 0.12)));
       const candidates = [
@@ -166,7 +172,7 @@ export class EngineRecorder {
             break;
           }
         } catch {
-          // try next codec
+          // try next
         }
       }
 
@@ -202,7 +208,7 @@ export class EngineRecorder {
       }
     }
 
-    // Fallback: Engine-composited MediaRecorder
+    // Fallback: Engine-composited MediaRecorder (MP4 on Safari/iOS, WebM elsewhere)
     if (typeof MediaRecorder === 'undefined' || !this.compCanvas.captureStream) {
       throw new Error('Video recording is not supported in this browser — switch to GIF!');
     }
@@ -212,9 +218,16 @@ export class EngineRecorder {
     const stream = this.compCanvas.captureStream(useManualPush ? 0 : Math.min(this.fps, 60));
     this.mrTrack = useManualPush ? stream.getVideoTracks()[0] : null;
 
-    const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
-      ? 'video/webm;codecs=vp9'
-      : (MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm');
+    const mimeCandidates = [
+      'video/mp4;codecs=avc1',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm',
+    ];
+    const mime = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+    this.mrMime = mime.split(';')[0];
+    this.mrExt = this.mrMime === 'video/mp4' ? 'mp4' : 'webm';
 
     const mr = new MediaRecorder(stream, {
       mimeType: mime,
@@ -225,7 +238,8 @@ export class EngineRecorder {
       if (e.data && e.data.size > 0) this.mrChunks.push(e.data);
     };
     mr.onstop = () => {
-      const blob = new Blob(this.mrChunks, { type: mime });
+      for (const tr of stream.getTracks()) tr.stop();
+      const blob = new Blob(this.mrChunks, { type: this.mrMime });
       if (this._mrStopResolve) {
         this._mrStopResolve(blob);
         this._mrStopResolve = null;
@@ -239,20 +253,23 @@ export class EngineRecorder {
     return {
       backend: 'mediarecorder',
       fps: this.fps,
-      message: `Recording ${this.fps} FPS video (MediaRecorder fallback)`,
+      message: `Recording ${this.fps} FPS video! Tap again to stop`,
     };
   }
 
-  /**
-   * Push one freshly rendered engine frame directly into the active encoder.
-   * Returns { limitReached: boolean } so caller can auto-stop GIFs cleanly at max duration.
-   */
   pushEngineFrame(glCanvas, theme) {
     if (!this.isRecording) return { limitReached: false };
 
     this._compositeFrame(glCanvas, theme);
 
-    if (this.backend === 'gif') {
+    if (this.backend === 'gif-worker') {
+      const img = this.compCtx.getImageData(0, 0, this.compCanvas.width, this.compCanvas.height);
+      this.gifFrames.push(img.data.buffer);
+      this.frameIndex++;
+      return { limitReached: this.frameIndex >= this.gifMaxFrames };
+    }
+
+    if (this.backend === 'gif-fallback') {
       if (this.gifEncoder) {
         this.gifEncoder.addCanvasFrame(this.compCtx);
       }
@@ -264,7 +281,6 @@ export class EngineRecorder {
       if (!this.encoder || this.encoder.state !== 'configured' || this._encoderError) {
         return { limitReached: false };
       }
-      // Backpressure protection for very high custom FPS on slower CPUs
       if (this.encoder.encodeQueueSize > 16) {
         this.frameIndex++;
         return { limitReached: false };
@@ -294,24 +310,72 @@ export class EngineRecorder {
     return this.fps > 0 ? (this.frameIndex / this.fps) : 0;
   }
 
+  _encodeGifWithWorker(buffers, width, height, fps) {
+    return new Promise((resolve, reject) => {
+      let worker;
+      try {
+        worker = new Worker(new URL('./gif-worker.js?v=18', import.meta.url));
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const delayMs = Math.max(20, Math.round(1000 / fps));
+      worker.onmessage = (e) => {
+        worker.terminate();
+        resolve(new Blob([e.data], { type: 'image/gif' }));
+      };
+      worker.onerror = (err) => {
+        worker.terminate();
+        reject(err);
+      };
+      worker.postMessage({ width, height, delayMs, buffers }, buffers);
+    });
+  }
+
   async stop() {
     if (!this.isRecording) return null;
     this.isRecording = false;
     const capturedFrames = this.frameIndex;
     const fps = this.fps;
 
-    if (this.backend === 'gif') {
+    if (this.backend === 'gif-worker') {
+      const buffers = this.gifFrames;
+      this.gifFrames = [];
+      this.backend = 'none';
+      if (buffers.length === 0) return null;
+
+      let blob = null;
+      try {
+        blob = await this._encodeGifWithWorker(buffers, this.compCanvas.width, this.compCanvas.height, fps);
+      } catch {
+        // Fallback if Worker failed
+        const enc = new MiniGifEncoder(this.compCanvas.width, this.compCanvas.height, fps);
+        const tmp = document.createElement('canvas');
+        tmp.width = this.compCanvas.width;
+        tmp.height = this.compCanvas.height;
+        const tctx = tmp.getContext('2d', { willReadFrequently: true });
+        for (const buf of buffers) {
+          if (buf.byteLength > 0) {
+            tctx.putImageData(new ImageData(new Uint8ClampedArray(buf), tmp.width, tmp.height), 0, 0);
+            enc.addCanvasFrame(tctx);
+          }
+        }
+        blob = enc.buildBlob();
+      }
+
+      const filename = `mochi-squish-${fps}fps-${Date.now()}.gif`;
+      const file = blob ? new File([blob], filename, { type: 'image/gif' }) : null;
+      return { file, blob, filename, frames: capturedFrames, fps, format: 'gif' };
+    }
+
+    if (this.backend === 'gif-fallback') {
       const enc = this.gifEncoder;
       this.gifEncoder = null;
       this.backend = 'none';
       const blob = enc ? enc.buildBlob() : null;
-      return {
-        blob,
-        filename: `mochi-squish-${fps}fps-${Date.now()}.gif`,
-        frames: capturedFrames,
-        fps,
-        format: 'gif',
-      };
+      const filename = `mochi-squish-${fps}fps-${Date.now()}.gif`;
+      const file = blob ? new File([blob], filename, { type: 'image/gif' }) : null;
+      return { file, blob, filename, frames: capturedFrames, fps, format: 'gif' };
     }
 
     if (this.backend === 'webcodecs') {
@@ -329,17 +393,15 @@ export class EngineRecorder {
         // ignore close errors
       }
       const blob = mux ? mux.buildBlob() : null;
-      return {
-        blob,
-        filename: `mochi-squish-${fps}fps-${Date.now()}.webm`,
-        frames: capturedFrames,
-        fps,
-        format: 'video',
-      };
+      const filename = `mochi-squish-${fps}fps-${Date.now()}.webm`;
+      const file = blob ? new File([blob], filename, { type: 'video/webm' }) : null;
+      return { file, blob, filename, frames: capturedFrames, fps, format: 'video' };
     }
 
     if (this.backend === 'mediarecorder') {
       const mr = this.mediaRecorder;
+      const ext = this.mrExt;
+      const mime = this.mrMime;
       this.mediaRecorder = null;
       this.mrTrack = null;
       this.backend = 'none';
@@ -351,13 +413,9 @@ export class EngineRecorder {
           resolve(null);
         }
       });
-      return {
-        blob,
-        filename: `mochi-squish-${fps}fps-${Date.now()}.webm`,
-        frames: capturedFrames,
-        fps,
-        format: 'video',
-      };
+      const filename = `mochi-squish-${fps}fps-${Date.now()}.${ext}`;
+      const file = blob ? new File([blob], filename, { type: mime }) : null;
+      return { file, blob, filename, frames: capturedFrames, fps, format: 'video' };
     }
 
     return null;

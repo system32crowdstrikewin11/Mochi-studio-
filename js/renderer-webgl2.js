@@ -1,13 +1,11 @@
 /**
- * MochiRendererWebGL2 v17 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
+ * MochiRendererWebGL2 v18 — Exact 1:1 High-Res GPU Mochi Mesh Renderer
  *
- * - Builds a dense 128..192 segment WebGL2 mesh (matching original meshShortSegs=128, meshMaxSegs=192)
- * - Runs all quintic falloff, ring bulge, 4-tap mask smoothing, depth-lift, and bicubic sampling
- *   on the GPU via ./shaders/mochi.{vert,frag}.glsl
- * - Two-pass depth-tested alpha rendering:
- *     Pass 0: Opaque interior (a >= 0.95) with depth write -> stretched cheeks overlap cleanly on top!
- *     Pass 1: Soft transparent edge fringe (a < 0.95) without depth write -> zero edge halo bugs!
- * - Smooth Zoom & Pan camera in exact isotropic space (`iso = (u * aspect, v)`, `fitRatio = 0.76`)
+ * - Dense 128..192 segment WebGL2 mesh with GPU analytic quintic-falloff physics,
+ *   ring bulge, 4-tap mask smoothing, depth-lift, bicubic zoom sampling, and Paint mask view
+ * - Exact 1:1 Original 2-Finger Similarity Transform (Zoom + Pan + Rotation!)
+ *   plus smooth animated Reset View & `isTransformed()` auto-hide check
+ * - Automatic WebGL2 `webglcontextlost` / `webglcontextrestored` recovery
  */
 
 const MESH_SHORT_SEGS = 128;
@@ -75,15 +73,19 @@ export class MochiRendererWebGL2 {
     this.program = null;
     this.u = {};
 
+    this.vertSrc = FALLBACK_VERT;
+    this.fragSrc = FALLBACK_FRAG;
+
     this.mesh = null;
     this.imageTex = null;
     this.maskTex = null;
+    this._lastImageSource = null;
 
     this.aspect = 1.0;
     this.imageW = 1;
     this.imageH = 1;
 
-    // View state (exact original iso -> canvas pixel -> clip transform)
+    // Base fit parameters
     this.canvasW = 1;
     this.canvasH = 1;
     this.cssWidth = 1;
@@ -93,19 +95,49 @@ export class MochiRendererWebGL2 {
     this.ox = 0;
     this.oy = 0;
 
-    // Smooth camera zoom & pan (in canvas pixels, supporting animated Reset View)
-    this.zoom = 1.0;
+    // Exact original 2D similarity view transform (zoom + pan + rotation in canvas pixels)
+    // Maps base canvas px (x, y) -> (a*x - b*y + tx, b*x + a*y + ty)
+    this.a = 1.0;
+    this.b = 0.0;
     this.tx = 0.0;
     this.ty = 0.0;
-    this.targetZoom = 1.0;
-    this.targetTx = 0.0;
-    this.targetTy = 0.0;
+    this.animReset = false;
     this.viewMat = new Float32Array(9);
 
     this.shadingEnabled = false;
   }
 
+  get scale() {
+    return Math.hypot(this.a, this.b);
+  }
+
+  get zoom() {
+    return this.scale;
+  }
+
+  get isAnimatingView() {
+    return this.animReset;
+  }
+
   async init() {
+    try {
+      const [vRes, fRes] = await Promise.all([
+        fetch('./shaders/mochi.vert.glsl?v=18'),
+        fetch('./shaders/mochi.frag.glsl?v=18'),
+      ]);
+      if (vRes.ok && fRes.ok) {
+        this.vertSrc = await vRes.text();
+        this.fragSrc = await fRes.text();
+      }
+    } catch {
+      // fallback embedded shaders ready
+    }
+
+    this._initGLContext();
+    this.resize();
+  }
+
+  _initGLContext() {
     const gl = this.canvas.getContext('webgl2', {
       alpha: true,
       antialias: true,
@@ -116,23 +148,10 @@ export class MochiRendererWebGL2 {
       throw new Error('WebGL2 is not supported on this browser.');
     }
     this.gl = gl;
+    this.mesh = null;
+    this.imageTex = null;
 
-    let vertSrc = FALLBACK_VERT;
-    let fragSrc = FALLBACK_FRAG;
-    try {
-      const [vRes, fRes] = await Promise.all([
-        fetch('./shaders/mochi.vert.glsl'),
-        fetch('./shaders/mochi.frag.glsl'),
-      ]);
-      if (vRes.ok && fRes.ok) {
-        vertSrc = await vRes.text();
-        fragSrc = await fRes.text();
-      }
-    } catch {
-      // fallback embedded shaders ready
-    }
-
-    this.program = this._createProgram(vertSrc, fragSrc);
+    this.program = this._createProgram(this.vertSrc, this.fragSrc);
     const names = [
       'uAspect', 'uView', 'uGrabCount', 'uGrabA', 'uGrabPull', 'uBulge',
       'uMotionDisp', 'uMask', 'uMaskEnabled', 'uMaskCell',
@@ -142,7 +161,6 @@ export class MochiRendererWebGL2 {
       this.u[n] = gl.getUniformLocation(this.program, n);
     }
 
-    // Default 1x1 white R8 mask texture
     this.maskTex = this._createDefaultMaskTex();
 
     gl.clearColor(0, 0, 0, 0);
@@ -150,8 +168,23 @@ export class MochiRendererWebGL2 {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
+  }
 
-    this.resize();
+  /** Automatic recovery after mobile app switching drops WebGL2 context */
+  restoreContext(maskCanvas = null) {
+    try {
+      this._initGLContext();
+      this.gl.viewport(0, 0, this.canvasW, this.canvasH);
+      if (this._lastImageSource) {
+        this.uploadTexture(this._lastImageSource);
+      }
+      if (maskCanvas) {
+        this.uploadMask(maskCanvas);
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   _compileShader(type, src) {
@@ -249,7 +282,9 @@ export class MochiRendererWebGL2 {
   }
 
   uploadTexture(source) {
+    this._lastImageSource = source;
     const gl = this.gl;
+    if (!gl || gl.isContextLost()) return;
     const w = source.naturalWidth || source.width || 512;
     const h = source.naturalHeight || source.height || 512;
     this.imageW = w;
@@ -273,10 +308,9 @@ export class MochiRendererWebGL2 {
     this._updateFit();
   }
 
-  /** Upload blurred grayscale/RGB mask canvas to R8 GPU texture */
   uploadMask(maskCanvas) {
     const gl = this.gl;
-    if (!gl || !this.maskTex) return;
+    if (!gl || !this.maskTex || gl.isContextLost()) return;
     gl.bindTexture(gl.TEXTURE_2D, this.maskTex);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, gl.RED, gl.UNSIGNED_BYTE, maskCanvas);
@@ -290,29 +324,105 @@ export class MochiRendererWebGL2 {
 
   resize() {
     const rect = this.canvas.getBoundingClientRect();
-    this.cssWidth = Math.max(1, rect.width);
-    this.cssHeight = Math.max(1, rect.height);
-    this.dpr = Math.min(window.devicePixelRatio || 1, 3);
-    this.canvasW = Math.max(1, Math.round(this.cssWidth * this.dpr));
-    this.canvasH = Math.max(1, Math.round(this.cssHeight * this.dpr));
-    this.canvas.width = this.canvasW;
-    this.canvas.height = this.canvasH;
-    if (this.gl) {
-      this.gl.viewport(0, 0, this.canvasW, this.canvasH);
+    const cssW = Math.max(1, rect.width);
+    const cssH = Math.max(1, rect.height);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const cw = Math.max(1, Math.round(cssW * dpr));
+    const ch = Math.max(1, Math.round(cssH * dpr));
+
+    if (cw === this.canvasW && ch === this.canvasH && cssW === this.cssWidth && cssH === this.cssHeight) {
+      return false;
+    }
+
+    this.cssWidth = cssW;
+    this.cssHeight = cssH;
+    this.dpr = dpr;
+    this.canvasW = cw;
+    this.canvasH = ch;
+    this.canvas.width = cw;
+    this.canvas.height = ch;
+    if (this.gl && !this.gl.isContextLost()) {
+      this.gl.viewport(0, 0, cw, ch);
     }
     this._updateFit();
+    return true;
+  }
+
+  // ==========================================================================
+  // Exact 1:1 Original Similarity View Transform (Zoom + Pan + Rotation!)
+  // ==========================================================================
+  isTransformed() {
+    return (
+      Math.abs(this.scale - 1) > 0.001 ||
+      Math.abs(this.b) > 0.001 ||
+      Math.abs(this.tx) > 0.5 ||
+      Math.abs(this.ty) > 0.5
+    );
+  }
+
+  resetView(animated = true) {
+    if (!animated) {
+      this.a = 1.0;
+      this.b = 0.0;
+      this.tx = 0.0;
+      this.ty = 0.0;
+      this.animReset = false;
+      return;
+    }
+    this.animReset = true;
+  }
+
+  _compose(c, s, dx, dy) {
+    const { a: r, b: n, tx: o, ty: h } = this;
+    this.a = c * r - s * n;
+    this.b = s * r + c * n;
+    this.tx = c * o - s * h + dx;
+    this.ty = s * o + c * h + dy;
+  }
+
+  /** Exact original 2-finger gesture (simultaneous zoom, pan, AND rotation!) */
+  applyGesture(p1Old, p2Old, p1New, p2New) {
+    this.animReset = false;
+    const dx0 = p2Old.x - p1Old.x;
+    const dy0 = p2Old.y - p1Old.y;
+    const dx1 = p2New.x - p1New.x;
+    const dy1 = p2New.y - p1New.y;
+    const d0Sq = dx0 * dx0 + dy0 * dy0;
+    if (d0Sq < 1e-6) return;
+
+    let c = (dx1 * dx0 + dy1 * dy0) / d0Sq;
+    let s = (dy1 * dx0 - dx1 * dy0) / d0Sq;
+    const f = Math.hypot(c, s);
+    if (f < 1e-6) return;
+
+    const clamped = Math.min(Math.max(f * this.scale, 0.5), 8.0) / this.scale;
+    c *= clamped / f;
+    s *= clamped / f;
+    this._compose(
+      c,
+      s,
+      p1New.x - (c * p1Old.x - s * p1Old.y),
+      p1New.y - (s * p1Old.x + c * p1Old.y)
+    );
+  }
+
+  /** Exact original wheel zoom centered directly under cursor canvas pixel */
+  zoomAt(pxX, pxY, factor) {
+    this.animReset = false;
+    const clamped = Math.min(Math.max(factor * this.scale, 0.5), 8.0) / this.scale;
+    this._compose(clamped, 0, pxX * (1 - clamped), pxY * (1 - clamped));
   }
 
   /** Column-major 3x3 matrix mapping iso -> WebGL clip space [-1..1] */
   _computeViewMatrix() {
-    const c = this.zoom * this.k;
-    const fx = this.zoom * this.ox + this.tx;
-    const fy = this.zoom * this.oy + this.ty;
-    const cw = this.canvasW;
-    const ch = this.canvasH;
+    const { k, ox, oy, canvasW: cw, canvasH: ch, a, b, tx, ty } = this;
+    const c = a * k;
+    const u = b * k;
+    const fx = a * ox - b * oy + tx;
+    const fy = b * ox + a * oy + ty;
     this.viewMat.set([
-      (2 * c) / cw, 0, 0,
-      0, (-2 * c) / ch, 0,
+      (2 * c) / cw, (-2 * u) / ch, 0,
+      (-2 * u) / cw, (-2 * c) / ch, 0,
       (2 * fx) / cw - 1, 1 - (2 * fy) / ch, 1,
     ]);
     return this.viewMat;
@@ -328,21 +438,15 @@ export class MochiRendererWebGL2 {
 
   isoFromClient(clientX, clientY) {
     const px = this.canvasPxFromClient(clientX, clientY);
-    const ix = (px.x - this.tx) / this.zoom;
-    const iy = (px.y - this.ty) / this.zoom;
+    const { a, b, tx, ty } = this;
+    const det = a * a + b * b;
+    const dx = px.x - tx;
+    const dy = px.y - ty;
+    const bx = (a * dx + b * dy) / det;
+    const by = (-b * dx + a * dy) / det;
     return {
-      x: (ix - this.ox) / this.k,
-      y: (iy - this.oy) / this.k,
-    };
-  }
-
-  /** Map isotropic coordinates -> CSS pixels relative to canvas top-left (for 2D overlay) */
-  screenFromIso(isoX, isoY) {
-    const px = (isoX * this.k + this.ox) * this.zoom + this.tx;
-    const py = (isoY * this.k + this.oy) * this.zoom + this.ty;
-    return {
-      x: (px / this.canvasW) * this.cssWidth,
-      y: (py / this.canvasH) * this.cssHeight,
+      x: (bx - this.ox) / this.k,
+      y: (by - this.oy) / this.k,
     };
   }
 
@@ -350,35 +454,31 @@ export class MochiRendererWebGL2 {
     return { x: isoX / this.aspect, y: isoY };
   }
 
-  /** Exact screen CSS length for an isotropic distance (guarantees 1:1 cursor-to-paint match!) */
+  /** Exact screen CSS length for an isotropic distance (1:1 cursor-to-paint match at any zoom/rotation!) */
   isoToCssLength(isoLen) {
     const rect = this.canvas.getBoundingClientRect();
-    return isoLen * this.k * this.zoom * (rect.width / Math.max(1, this.canvasW));
+    return isoLen * this.k * this.scale * (rect.width / Math.max(1, this.canvasW));
   }
 
-  resetView() {
-    this.targetZoom = 1.0;
-    this.targetTx = 0.0;
-    this.targetTy = 0.0;
-  }
-
-  /** Keep anchorIso locked directly beneath canvas pixel (pxX, pxY) at newZoom */
-  setViewAnchored(newZoom, anchorIsoX, anchorIsoY, pxX, pxY) {
-    const z = Math.max(0.45, Math.min(6.0, newZoom));
-    const basePxX = anchorIsoX * this.k + this.ox;
-    const basePxY = anchorIsoY * this.k + this.oy;
-    this.zoom = this.targetZoom = z;
-    this.tx = this.targetTx = pxX - basePxX * z;
-    this.ty = this.targetTy = pxY - basePxY * z;
+  stepViewAnimation() {
+    if (!this.animReset) return false;
+    this.a += (1.0 - this.a) * 0.25;
+    this.b += (0.0 - this.b) * 0.25;
+    this.tx += (0.0 - this.tx) * 0.25;
+    this.ty += (0.0 - this.ty) * 0.25;
+    if (!this.isTransformed()) {
+      this.a = 1.0;
+      this.b = 0.0;
+      this.tx = 0.0;
+      this.ty = 0.0;
+      this.animReset = false;
+    }
+    return true;
   }
 
   render(maskView = false) {
     const gl = this.gl;
-    if (!gl) return;
-
-    this.zoom += (this.targetZoom - this.zoom) * 0.22;
-    this.tx += (this.targetTx - this.tx) * 0.22;
-    this.ty += (this.targetTy - this.ty) * 0.22;
+    if (!gl || gl.isContextLost()) return;
 
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     if (!this.mesh || !this.imageTex) return;
@@ -399,7 +499,7 @@ export class MochiRendererWebGL2 {
     gl.uniform2f(u.uMaskCell, 1 / this.mesh.segsX, 1 / this.mesh.segsY);
 
     gl.uniform2f(u.uTexSize, this.imageW, this.imageH);
-    const displayScale = (this.k * this.zoom) / Math.max(1, this.imageH);
+    const displayScale = (this.k * this.scale) / Math.max(1, this.imageH);
     gl.uniform1f(u.uBicubic, displayScale > 1.05 ? 1.0 : 0.0);
     gl.uniform1f(u.uShading, this.shadingEnabled ? 1.0 : 0.0);
 
@@ -414,18 +514,14 @@ export class MochiRendererWebGL2 {
     gl.bindVertexArray(this.mesh.vao);
 
     if (maskView) {
-      // Exact original single-pass Paint mode render with GPU quantized mask overlay
       gl.uniform1f(u.uPass, 0.0);
       gl.depthMask(true);
       gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
     } else {
-      // Exact 2-pass depth-tested alpha draw:
-      // Pass 0: opaque pixels write depth (pulled cheeks overlap cleanly in front!)
       gl.uniform1f(u.uPass, 0.0);
       gl.depthMask(true);
       gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);
 
-      // Pass 1: semi-transparent anti-aliased edge fringe blends cleanly without punching depth holes
       gl.uniform1f(u.uPass, 1.0);
       gl.depthMask(false);
       gl.drawElements(gl.TRIANGLES, this.mesh.indexCount, gl.UNSIGNED_SHORT, 0);

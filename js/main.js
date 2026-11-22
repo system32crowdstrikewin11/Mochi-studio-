@@ -1,37 +1,42 @@
 /**
- * Mochi Studio v17 — Main Application Controller
+ * Mochi Studio v18 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
- * - Exact 1:1 Original Aspect-Matched Brush Tool (Hard/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
+ * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
+ * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
  * - Exact 1:1 Original Synthesized Web Audio (Grab puff + Wobble-synced Release boing)
- * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint & Play Modes + Undo / Redo
- * - Optional Phone Motion Sensors (Tilt gravity + Shake jiggle) + Virtual Tilt Pad
- * - Direct Engine Video Recording (60 / 90 / 120 / Custom FPS) & Optional High-FPS GIF (up to 60 FPS)
+ * - Exact 1:1 Original Recording Preview Modal + OS Share Sheet + Adaptive 256-Color GIF Worker
+ * - High-Resolution 2048px EXIF-Oriented Image Loader + Global Drag-Drop + WebGL2 Context Recovery
+ * - Idle GPU Optimization (0% GPU draw when still) + Undo/Redo + Motion Sensors + 60/90/120/Custom FPS Video
  */
 
 import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js';
-import { BrushEngine } from './brush-engine.js';
-import { MotionSensorManager } from './motion-sensors.js';
-import { SquishAudio } from './audio-squish.js';
-import { EngineRecorder } from './engine-recorder.js';
-import { getSample } from './samples.js';
+} from './physics-continuum.js?v=18';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=18';
+import { BrushEngine } from './brush-engine.js?v=18';
+import { MotionSensorManager } from './motion-sensors.js?v=18';
+import { SquishAudio } from './audio-squish.js?v=18';
+import { EngineRecorder } from './engine-recorder.js?v=18';
+import { getSample } from './samples.js?v=18';
 
 const $ = (id) => document.getElementById(id);
+const IMAGE_MAX_SIDE = 2048;
 
 const state = {
   step: 'play', // 'image' | 'paint' | 'play'
   currentSample: 'bear',
   artworkSource: null,
 
-  // Active pointers: Map<pointerId, { clientX, clientY, prevIsoX, prevIsoY, currIsoX, currIsoY, role, pointerType }>
+  // Active pointers: Map<pointerId, { pxX, pxY, clientX, clientY, prevIsoX, prevIsoY, currIsoX, currIsoY, role, pointerType }>
   activeTouches: new Map(),
-  pinchState: null,
+  gestureActive: false,
   brushPreviewTimer: 0,
   cursorVisible: false,
+
+  // Idle GPU optimization flag (only redraw when something moved/changed!)
+  needsRender: true,
 
   // Direct Engine Recording config & fixed-timestep accumulator
   recordFormat: 'video',     // 'video' | 'gif'
@@ -58,7 +63,6 @@ const motion = new MotionSensorManager();
 const audio = new SquishAudio();
 const recorder = new EngineRecorder();
 
-// Connect physics mask sampler to BrushEngine's exact blurred mask
 physics.maskSample = brush.sampleBlurred;
 
 // ============================================================================
@@ -78,10 +82,64 @@ function showToast(msg, duration = 2600) {
 }
 
 // ============================================================================
-// Exact 1:1 Original Brush Cursor & Center Preview Sizing
+// EXIF-Aware, 2048px-Capped Image Decoder (matches original quality & safety)
+// ============================================================================
+async function decodeImageFallback(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return img;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function decodeAndScaleImageBlob(blob) {
+  if (!blob || !blob.type.startsWith('image/')) {
+    throw new Error('Not an image file');
+  }
+  let bmp;
+  if (blob.type === 'image/svg+xml' || typeof createImageBitmap !== 'function') {
+    bmp = await decodeImageFallback(blob);
+  } else {
+    try {
+      bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+    } catch {
+      bmp = await decodeImageFallback(blob);
+    }
+  }
+
+  const nw = 'naturalWidth' in bmp ? bmp.naturalWidth : bmp.width;
+  const nh = 'naturalHeight' in bmp ? bmp.naturalHeight : bmp.height;
+  if (!nw || !nh) {
+    if ('close' in bmp) bmp.close();
+    throw new Error('Empty image');
+  }
+
+  const scale = Math.min(1, IMAGE_MAX_SIDE / Math.max(nw, nh));
+  const w = Math.max(1, Math.round(nw * scale));
+  const h = Math.max(1, Math.round(nh * scale));
+
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, 0, 0, w, h);
+  if ('close' in bmp) bmp.close();
+  return out;
+}
+
+// ============================================================================
+// Exact 1:1 Original Brush Cursor, Center Preview & Auto-Hide Reset View
 // ============================================================================
 function updateBrushCursorSize() {
-  const diam = renderer.isoToCssLength(brush.brushRadius * physics.S) * 2;
+  const r = Number.isFinite(brush.brushRadius) ? Math.max(0.01, Math.min(0.20, brush.brushRadius)) : 0.07;
+  brush.brushRadius = r;
+  const diam = Math.max(4, renderer.isoToCssLength(r * physics.S) * 2);
   brushCursorEl.style.width = `${diam}px`;
   brushCursorEl.style.height = `${diam}px`;
   brushPreviewEl.style.width = `${diam}px`;
@@ -97,6 +155,14 @@ function updateBrushCursorClasses() {
   brushPreviewEl.classList.toggle('eraser', isEraser);
 }
 
+function syncBrushSizeSlider() {
+  const slider = $('brushSize');
+  const intVal = Math.max(10, Math.min(200, Math.round(brush.brushRadius * 1000)));
+  slider.value = String(intVal);
+  updateSliderFill(slider);
+  updateBrushCursorSize();
+}
+
 function showBrushPreview(duration = 800) {
   if (state.step !== 'paint') return;
   updateBrushCursorSize();
@@ -110,7 +176,7 @@ function showBrushPreview(duration = 800) {
 function hideBrushPreview() {
   clearTimeout(state.brushPreviewTimer);
   brushPreviewEl.classList.add('hidden');
-  if (state.step === 'paint' && state.cursorVisible && !state.pinchState) {
+  if (state.step === 'paint' && state.cursorVisible && !state.gestureActive) {
     brushCursorEl.classList.remove('hidden');
   }
 }
@@ -121,9 +187,16 @@ function moveBrushCursor(clientX, clientY) {
   brushCursorEl.style.top = `${clientY - rect.top}px`;
   updateBrushCursorSize();
   state.cursorVisible = true;
-  if (state.step === 'paint' && brushPreviewEl.classList.contains('hidden') && !state.pinchState) {
+  if (state.step === 'paint' && brushPreviewEl.classList.contains('hidden') && !state.gestureActive) {
     brushCursorEl.classList.remove('hidden');
   }
+}
+
+function afterViewChange() {
+  state.needsRender = true;
+  updateBrushCursorSize();
+  const showReset = state.step !== 'image' && renderer.isTransformed();
+  $('btnResetView').classList.toggle('hidden', !showReset);
 }
 
 // ============================================================================
@@ -145,19 +218,20 @@ function setStep(nextStep) {
   $('dockPaint').classList.toggle('hidden', nextStep !== 'paint');
   $('paintHint').classList.toggle('hidden', nextStep !== 'paint');
   $('dockPlay').classList.toggle('hidden', nextStep !== 'play');
-  $('btnResetView').classList.toggle('hidden', nextStep === 'image');
 
   state.activeTouches.clear();
-  state.pinchState = null;
+  state.gestureActive = false;
   brush.cancelStroke();
   physics.resetPose();
   state.cursorVisible = false;
   brushCursorEl.classList.add('hidden');
   brushPreviewEl.classList.add('hidden');
+  state.needsRender = true;
 
   if (nextStep === 'paint') {
     $('motionHud').classList.add('hidden');
     brush.dirty = true;
+    syncBrushSizeSlider();
     showBrushPreview(900);
   } else if (nextStep === 'play') {
     if (!brush.hasAnyPaint()) {
@@ -172,10 +246,12 @@ function setStep(nextStep) {
     }
     updateMotionHud();
   }
+
+  afterViewChange();
 }
 
 // ============================================================================
-// Load Artwork (Sample, File Picker, Drag-Drop, or Ctrl+V Paste)
+// Load Artwork (Sample, File Picker, Global Drag-Drop, or Ctrl+V Paste)
 // ============================================================================
 function loadArtwork(imgOrCanvas) {
   state.artworkSource = imgOrCanvas;
@@ -188,9 +264,9 @@ function loadArtwork(imgOrCanvas) {
   brush.setup(aspect);
   renderer.uploadTexture(imgOrCanvas);
   renderer.uploadMask(brush.canvas);
-  renderer.resetView();
+  renderer.resetView(false);
   physics.maskEnabled = false;
-  updateBrushCursorSize();
+  afterViewChange();
 }
 
 function selectSample(key, goStep = null, silentToast = false) {
@@ -214,118 +290,118 @@ function populateSampleThumbnails() {
   }
 }
 
-function handleImageBlob(blob) {
+async function handleImageBlob(blob) {
   if (!blob || !blob.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    const img = new Image();
-    img.onload = () => {
-      document.querySelectorAll('.sample-chip').forEach((c) => c.classList.remove('active'));
-      loadArtwork(img);
-      setStep('paint');
-      showToast('Paint squishy parts, or tap Play to make the whole image squishy!', 3000);
-    };
-    img.src = reader.result;
-  };
-  reader.readAsDataURL(blob);
-}
-
-// ============================================================================
-// 2-Finger Pinch-Zoom & Pan (Works in BOTH Paint Mode AND Play Mode!)
-// ============================================================================
-function getPinchPointers() {
-  if (state.step === 'paint') {
-    return Array.from(state.activeTouches.values());
+  try {
+    const scaledCanvas = await decodeAndScaleImageBlob(blob);
+    document.querySelectorAll('.sample-chip').forEach((c) => c.classList.remove('active'));
+    loadArtwork(scaledCanvas);
+    setStep('paint');
+    showToast('Paint squishy parts, or tap Play to make the whole image squishy!', 3000);
+  } catch {
+    showToast("Couldn't load the image — please try another file.", 3000);
   }
-  return Array.from(state.activeTouches.values()).filter((p) => p.role === 'bg');
 }
 
-function startTwoFingerPinch() {
-  const pts = getPinchPointers();
-  if (pts.length < 2) return;
-  const [p1, p2] = pts;
-  const midClientX = (p1.clientX + p2.clientX) * 0.5;
-  const midClientY = (p1.clientY + p2.clientY) * 0.5;
-  const dist = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
-  const anchorIso = renderer.isoFromClient(midClientX, midClientY);
+// ============================================================================
+// Exact 1:1 Original 2-Finger Zoom + Pan + Rotation Handler
+// ============================================================================
+function handleTwoFingerGestureMove(e) {
+  if (!state.activeTouches.has(e.pointerId)) return;
+  const entries = Array.from(state.activeTouches.entries());
+  if (entries.length < 2) return;
 
-  state.pinchState = {
-    startDist: Math.max(12, dist),
-    startZoom: renderer.zoom,
-    anchorIsoX: anchorIso.x,
-    anchorIsoY: anchorIso.y,
-  };
-  brushCursorEl.classList.add('hidden');
-}
+  const [id1, r1] = entries[0];
+  const [id2, r2] = entries[1];
+  const newPx = renderer.canvasPxFromClient(e.clientX, e.clientY);
+  const p1Old = { x: r1.pxX, y: r1.pxY };
+  const p2Old = { x: r2.pxX, y: r2.pxY };
 
-function updateTwoFingerPinch() {
-  const pts = getPinchPointers();
-  if (pts.length < 2 || !state.pinchState) return;
-  const [p1, p2] = pts;
-  const midClientX = (p1.clientX + p2.clientX) * 0.5;
-  const midClientY = (p1.clientY + p2.clientY) * 0.5;
-  const dist = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
+  if (e.pointerId === id1) {
+    renderer.applyGesture(p1Old, p2Old, newPx, p2Old);
+    r1.pxX = newPx.x;
+    r1.pxY = newPx.y;
+  } else if (e.pointerId === id2) {
+    renderer.applyGesture(p1Old, p2Old, p1Old, newPx);
+    r2.pxX = newPx.x;
+    r2.pxY = newPx.y;
+  } else {
+    return;
+  }
 
-  const newZoom = state.pinchState.startZoom * (dist / state.pinchState.startDist);
-  const midPx = renderer.canvasPxFromClient(midClientX, midClientY);
-  renderer.setViewAnchored(newZoom, state.pinchState.anchorIsoX, state.pinchState.anchorIsoY, midPx.x, midPx.y);
-  updateBrushCursorSize();
+  afterViewChange();
 }
 
 function paintAt(clientX, clientY) {
   const iso = renderer.isoFromClient(clientX, clientY);
   const uv = renderer.restUvFromIso(iso.x, iso.y);
-  // Paint strictly centered at cursor UV (no edge clamping distortion!)
   brush.strokeTo(uv.x, uv.y, physics.S);
+  state.needsRender = true;
 }
 
 // ============================================================================
-// Unified Pointer Events
+// Unified Pointer Events + ContextMenu / GestureStart Protection
 // ============================================================================
+glCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+
 glCanvas.addEventListener('pointerdown', (e) => {
   if (state.step === 'image') return;
+  e.preventDefault();
   try { glCanvas.setPointerCapture(e.pointerId); } catch {}
+  const px = renderer.canvasPxFromClient(e.clientX, e.clientY);
   const iso = renderer.isoFromClient(e.clientX, e.clientY);
 
   if (state.step === 'play') {
+    if (state.gestureActive) {
+      state.activeTouches.set(e.pointerId, {
+        pxX: px.x, pxY: px.y, clientX: e.clientX, clientY: e.clientY,
+        prevIsoX: iso.x, prevIsoY: iso.y, currIsoX: iso.x, currIsoY: iso.y,
+        role: 'bg', pointerType: e.pointerType,
+      });
+      return;
+    }
+
     const grab = physics.tryGrab(e.pointerId, iso.x, iso.y);
     const role = grab ? 'grab' : 'bg';
     state.activeTouches.set(e.pointerId, {
-      clientX: e.clientX,
-      clientY: e.clientY,
-      prevIsoX: iso.x,
-      prevIsoY: iso.y,
-      currIsoX: iso.x,
-      currIsoY: iso.y,
-      role,
-      pointerType: e.pointerType,
+      pxX: px.x, pxY: px.y, clientX: e.clientX, clientY: e.clientY,
+      prevIsoX: iso.x, prevIsoY: iso.y, currIsoX: iso.x, currIsoY: iso.y,
+      role, pointerType: e.pointerType,
     });
 
     if (grab) {
       audio.playGrab();
-    } else if (getPinchPointers().length >= 2) {
+      state.needsRender = true;
+    } else if (state.activeTouches.size >= 2) {
+      // Exact original behavior: touching background with a 2nd finger enters 2-finger zoom/pan/rotate
+      state.gestureActive = true;
       physics.releaseAllActive();
-      startTwoFingerPinch();
+      state.needsRender = true;
     }
     return;
   }
 
-  // PAINT MODE — Exact original 1-finger paint + lossless 2-finger pinch cancellation
+  // PAINT MODE — Exact original 1-finger paint + lossless 2-finger zoom/pan/rotate cancellation
   if (!brushPreviewEl.classList.contains('hidden')) hideBrushPreview();
-  state.activeTouches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY, role: 'paint' });
+  state.activeTouches.set(e.pointerId, {
+    pxX: px.x, pxY: px.y, clientX: e.clientX, clientY: e.clientY, role: 'paint',
+  });
 
-  if (state.activeTouches.size === 1 && !state.pinchState) {
+  if (state.activeTouches.size === 1 && !state.gestureActive) {
     brush.beginStroke();
     moveBrushCursor(e.clientX, e.clientY);
     paintAt(e.clientX, e.clientY);
-  } else if (state.activeTouches.size >= 2 && !state.pinchState) {
+  } else if (state.activeTouches.size === 2 && !state.gestureActive) {
+    state.gestureActive = true;
     brush.cancelStroke();
-    startTwoFingerPinch();
+    brushCursorEl.classList.add('hidden');
+    state.needsRender = true;
   }
 });
 
 glCanvas.addEventListener('pointermove', (e) => {
-  if (state.step === 'paint' && !state.pinchState) {
+  if (state.step === 'paint' && !state.gestureActive) {
     moveBrushCursor(e.clientX, e.clientY);
   }
 
@@ -333,6 +409,15 @@ glCanvas.addEventListener('pointermove', (e) => {
   if (!rec) return;
   rec.clientX = e.clientX;
   rec.clientY = e.clientY;
+
+  if (state.gestureActive) {
+    handleTwoFingerGestureMove(e);
+    return;
+  }
+
+  const px = renderer.canvasPxFromClient(e.clientX, e.clientY);
+  rec.pxX = px.x;
+  rec.pxY = px.y;
 
   if (state.step === 'play') {
     if (rec.role === 'grab') {
@@ -344,50 +429,46 @@ glCanvas.addEventListener('pointermove', (e) => {
         rec.prevIsoY = iso.y;
         physics.move(e.pointerId, iso.x, iso.y);
       }
-    } else if (getPinchPointers().length >= 2) {
-      updateTwoFingerPinch();
+      state.needsRender = true;
     }
     return;
   }
 
-  if (state.step === 'paint') {
-    if (state.pinchState) {
-      updateTwoFingerPinch();
-      return;
-    }
-    if (brush.isDrawing) {
-      const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
-      const list = events && events.length > 0 ? events : [e];
-      for (let i = 0; i < list.length; i++) {
-        paintAt(list[i].clientX, list[i].clientY);
-      }
+  if (state.step === 'paint' && brush.isDrawing) {
+    const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
+    const list = events && events.length > 0 ? events : [e];
+    for (let i = 0; i < list.length; i++) {
+      paintAt(list[i].clientX, list[i].clientY);
     }
   }
 });
 
 function handlePointerEnd(e) {
   const rec = state.activeTouches.get(e.pointerId);
-  state.activeTouches.delete(e.pointerId);
+  if (!state.activeTouches.delete(e.pointerId)) return;
 
   if (state.step === 'play') {
+    if (state.gestureActive) {
+      if (state.activeTouches.size === 0) state.gestureActive = false;
+      return;
+    }
     if (rec && rec.role === 'grab') {
       const g = physics.release(e.pointerId);
       if (g) {
         audio.playRelease(physics.intensityOf(g), physics.params.releaseFreq);
+        state.needsRender = true;
       }
-    }
-    if (getPinchPointers().length < 2) {
-      state.pinchState = null;
     }
     return;
   }
 
   if (state.step === 'paint') {
-    if (!state.pinchState && brush.isDrawing && state.activeTouches.size === 0) {
+    if (!state.gestureActive && brush.isDrawing && state.activeTouches.size === 0) {
       brush.endStroke();
+      state.needsRender = true;
     }
     if (state.activeTouches.size === 0) {
-      state.pinchState = null;
+      state.gestureActive = false;
       if (e.pointerType === 'touch') {
         state.cursorVisible = false;
         brushCursorEl.classList.add('hidden');
@@ -411,17 +492,19 @@ glCanvas.addEventListener('pointerleave', () => {
 glCanvas.addEventListener('wheel', (e) => {
   if (state.step === 'image') return;
   e.preventDefault();
-  const anchorIso = renderer.isoFromClient(e.clientX, e.clientY);
-  const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
   const px = renderer.canvasPxFromClient(e.clientX, e.clientY);
-  renderer.setViewAnchored(renderer.zoom * factor, anchorIso.x, anchorIso.y, px.x, px.y);
-  updateBrushCursorSize();
+  renderer.zoomAt(px.x, px.y, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)));
+  afterViewChange();
 }, { passive: false });
 
 // ============================================================================
 // 2D Overlay Rendering (Desktop Pointer Ring in Play Mode)
 // ============================================================================
+let overlayHasDrawn = false;
 function renderOverlay() {
+  const showMouseDots = state.step === 'play' && state.activeTouches.size > 0;
+  if (!showMouseDots && !overlayHasDrawn) return;
+
   const w = renderer.cssWidth;
   const h = renderer.cssHeight;
   const dpr = renderer.dpr;
@@ -432,8 +515,9 @@ function renderOverlay() {
 
   overlayCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   overlayCtx.clearRect(0, 0, w, h);
+  overlayHasDrawn = false;
 
-  if (state.step === 'play' && state.activeTouches.size > 0) {
+  if (showMouseDots) {
     const rect = glCanvas.getBoundingClientRect();
     for (const pt of state.activeTouches.values()) {
       if (pt.pointerType !== 'mouse') continue;
@@ -448,31 +532,38 @@ function renderOverlay() {
       overlayCtx.strokeStyle = 'rgba(242, 132, 164, 0.55)';
       overlayCtx.stroke();
       overlayCtx.restore();
+      overlayHasDrawn = true;
     }
   }
 }
 
 // ============================================================================
-// Main Loop (with Direct Engine-Stepped High-FPS Recording Pipeline!)
+// Main Loop (Idle GPU Optimization + Direct Engine-Stepped High-FPS Recording!)
 // ============================================================================
 function tick(now) {
   const dt = Math.min(0.05, Math.max(0.001, (now - state.lastFrameTime) / 1000));
   state.lastFrameTime = now;
 
-  // Upload mask texture whenever dirty (unblurred in Paint mode, blurred in Play mode!)
+  // Smooth Reset View animation
+  if (renderer.stepViewAnimation()) {
+    afterViewChange();
+  }
+
+  // Upload mask texture whenever dirty (unblurred in Paint mode, blurred in Play mode)
   if (brush.dirty) {
     renderer.uploadMask(state.step === 'paint' ? brush.canvas : brush.textureSource());
     brush.dirty = false;
+    state.needsRender = true;
   }
 
   if (state.step === 'paint') {
-    renderer.render(true);
-    // Keep cursor ring synced smoothly during animated Reset View zoom transitions
-    if (Math.abs(renderer.zoom - renderer.targetZoom) > 0.001) {
-      updateBrushCursorSize();
+    if (state.needsRender) {
+      renderer.render(true);
+      state.needsRender = false;
     }
   } else if (state.step === 'play') {
     const f = motion.getCombinedForce();
+    const hasForce = Math.abs(f.gx) > 1e-4 || Math.abs(f.gy) > 1e-4 || Math.abs(f.ax) > 1e-4 || Math.abs(f.ay) > 1e-4;
     physics.setMotionForce(f.gx, f.gy, f.ax, f.ay);
 
     if (motion.enabled || motion.virtualEnabled) {
@@ -548,6 +639,7 @@ function tick(now) {
           }
         }
       }
+      state.needsRender = false;
 
       const sec = Math.floor(recorder.getElapsedSeconds());
       const mm = String(Math.floor(sec / 60)).padStart(2, '0');
@@ -555,11 +647,19 @@ function tick(now) {
       const tag = recorder.format === 'gif' ? `${recorder.fps} FPS GIF` : `${recorder.fps} FPS`;
       $('recTimer').textContent = `${mm}:${ss} • ${tag}`;
     } else {
-      physics.step(dt);
-      renderer.render(false);
+      const wasActive = physics.active;
+      if (wasActive || hasForce) {
+        physics.step(dt);
+        state.needsRender = true;
+      }
+      if (state.needsRender) {
+        renderer.render(false);
+        state.needsRender = false;
+      }
     }
-  } else {
+  } else if (state.needsRender) {
     renderer.render(false);
+    state.needsRender = false;
   }
 
   renderOverlay();
@@ -567,7 +667,145 @@ function tick(now) {
 }
 
 // ============================================================================
-// Direct Engine Video (60/90/120/Custom FPS) & Optional High-FPS GIF Recording
+// Recording Preview Modal + OS Share Sheet + Download (1:1 Original UX!)
+// ============================================================================
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+  (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1);
+
+const previewCtl = (() => {
+  const modal = $('previewModal');
+  const media = $('previewMedia');
+  const metaEl = $('previewMeta');
+  const btnShare = $('btnPreviewShare');
+  const btnDownload = $('btnPreviewDownload');
+  const noteEl = $('previewNote');
+
+  let currentFile = null;
+  let currentUrl = '';
+  let canShareFile = false;
+
+  const formatBytes = (b) => {
+    if (b < 1024 * 1024) return `${Math.max(1, Math.round(b / 1024))} KB`;
+    return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const downloadFile = (file) => {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
+  const shareFile = async (file, text) => {
+    try {
+      await navigator.share(text ? { files: [file], text } : { files: [file] });
+    } catch (err) {
+      if (err && err.name !== 'AbortError') {
+        showToast("Couldn't open share sheet — try Download instead.", 2600);
+      }
+    }
+  };
+
+  const close = () => {
+    modal.classList.add('hidden');
+    media.replaceChildren();
+    if (currentUrl) URL.revokeObjectURL(currentUrl);
+    currentUrl = '';
+    currentFile = null;
+  };
+
+  const back = () => {
+    if (history.state && history.state.mochiPreview) {
+      history.back();
+    } else {
+      close();
+    }
+  };
+
+  window.addEventListener('popstate', () => {
+    if (!modal.classList.contains('hidden')) close();
+  });
+  $('btnPreviewBack').addEventListener('click', back);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) back();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) back();
+  });
+
+  btnDownload.addEventListener('click', () => {
+    if (!currentFile) return;
+    if (isIOS && canShareFile) {
+      shareFile(currentFile);
+    } else {
+      downloadFile(currentFile);
+      showToast(`Saved ${currentFile.name}!`, 2200);
+    }
+  });
+
+  btnShare.addEventListener('click', () => {
+    if (!currentFile) return;
+    if (canShareFile) {
+      shareFile(currentFile, 'Made a squishy animation in Mochi Studio!');
+    } else {
+      downloadFile(currentFile);
+      showToast('Downloaded — attach it anywhere to share!', 2600);
+    }
+  });
+
+  return {
+    show(result) {
+      close();
+      const file = result.file;
+      if (!file) return;
+      currentFile = file;
+      currentUrl = URL.createObjectURL(file);
+      const isVideo = file.type.startsWith('video/');
+
+      if (isVideo) {
+        const v = document.createElement('video');
+        v.autoplay = true;
+        v.loop = true;
+        v.muted = true;
+        v.playsInline = true;
+        v.setAttribute('playsinline', '');
+        v.src = currentUrl;
+        v.addEventListener('click', () => v.play().catch(() => {}));
+        media.replaceChildren(v);
+      } else {
+        const img = document.createElement('img');
+        img.alt = 'Recorded squishy GIF';
+        img.src = currentUrl;
+        media.replaceChildren(img);
+      }
+
+      const fmtLabel = isVideo ? (file.type.includes('mp4') ? 'MP4' : 'WebM') : 'GIF';
+      metaEl.textContent = `${result.fps} FPS ${fmtLabel} • ${formatBytes(file.size)}`;
+
+      canShareFile = Boolean(navigator.canShare && navigator.canShare({ files: [file] }));
+      btnShare.classList.toggle('hidden', !canShareFile);
+      btnDownload.textContent = isIOS && canShareFile ? 'Save to Photos' : 'Download';
+
+      if (isIOS) {
+        noteEl.textContent = canShareFile
+          ? 'Tap "Save to Photos" or "Share" to send straight to other apps.'
+          : (isVideo ? 'Open in Safari to save videos to Photos.' : 'Long-press the GIF above to save it.');
+      } else {
+        noteEl.textContent = canShareFile
+          ? 'Share directly to Discord, WhatsApp, X, or download the file.'
+          : `${result.frames} engine frames captured cleanly — click Download to save.`;
+      }
+
+      modal.classList.remove('hidden');
+      try { history.pushState({ mochiPreview: true }, ''); } catch {}
+    },
+  };
+})();
+
+// ============================================================================
+// Direct Engine Video (60/90/120/Custom FPS) & Adaptive Worker GIF Recording
 // ============================================================================
 function getActiveRecordFps() {
   if (state.recordFormat === 'gif') {
@@ -579,36 +817,24 @@ function getActiveRecordFps() {
   return Number(state.videoFpsMode) || 60;
 }
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-}
-
 async function stopRecordingFlow() {
   if (!recorder.isRecording || state.recStopping) return;
   state.recStopping = true;
   $('recBadge').classList.add('hidden');
   $('btnRecord').classList.remove('recording');
   $('recLabel').textContent = 'Record';
-  showToast(recorder.format === 'gif' ? 'Finalizing GIF...' : 'Finalizing video...', 1800);
+  showToast(recorder.format === 'gif' ? 'Making adaptive 256-color GIF...' : 'Finalizing video...', 2400);
 
   try {
     const result = await recorder.stop();
-    if (result && result.blob && result.blob.size > 0) {
-      downloadBlob(result.blob, result.filename);
-      const label = result.format === 'gif'
-        ? `Saved ${result.fps} FPS GIF (${result.frames} frames)!`
-        : `Saved ${result.fps} FPS video (${result.frames} engine frames)!`;
-      showToast(label, 3000);
+    if (result && result.file && result.file.size > 0) {
+      hideToast();
+      previewCtl.show(result);
     } else {
       showToast('Recording was empty — try squishing for a moment!');
     }
   } catch {
-    showToast('Could not save recording.');
+    showToast('Could not finalize recording.');
   } finally {
     state.recStopping = false;
     state.recAccum = 0;
@@ -654,6 +880,7 @@ function initVirtualPad() {
     const r = arena.clientWidth * 0.36;
     knob.style.transform = `translate(calc(-50% + ${nx * r}px), calc(-50% + ${ny * r}px))`;
     motion.setVirtualTilt(nx, ny);
+    state.needsRender = true;
   };
 
   const updateFromEvent = (e) => {
@@ -687,6 +914,7 @@ function initVirtualPad() {
   $('btnVpadShake').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
     audio.playRelease(0.65, physics.params.releaseFreq);
+    state.needsRender = true;
   });
   $('btnCloseVpad').addEventListener('click', () => setVirtualPadOpen(false));
 }
@@ -697,6 +925,7 @@ function setVirtualPadOpen(open) {
   $('optVpad').checked = open;
   if (!open) motion.setVirtualTilt(0, 0);
   updateMotionHud();
+  state.needsRender = true;
 }
 
 function updateMotionHud() {
@@ -718,7 +947,7 @@ function updateSoundUI() {
 }
 
 // ============================================================================
-// UI Bindings
+// UI Bindings + Global Drag-Drop + WebGL2 Context Recovery + ResizeObserver
 // ============================================================================
 function updateSliderFill(el) {
   if (!el) return;
@@ -745,10 +974,90 @@ function syncSlidersFromPhysics() {
   refreshAllSliderFills();
 }
 
+function wireGlobalFileInputs() {
+  $('fileInput').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) handleImageBlob(file);
+    e.target.value = '';
+  });
+
+  // Global drag & drop works in Add, Paint, AND Play modes!
+  const dropOverlay = $('dropOverlay');
+  const dz = $('dropzone');
+  const hasFiles = (e) => Boolean(e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files'));
+  let dragDepth = 0;
+
+  window.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    if (hasFiles(e)) {
+      dragDepth++;
+      dropOverlay.classList.remove('hidden');
+      dz.classList.add('dragover');
+    }
+  });
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) {
+      dropOverlay.classList.add('hidden');
+      dz.classList.remove('dragover');
+    }
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    dropOverlay.classList.add('hidden');
+    dz.classList.remove('dragover');
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) handleImageBlob(file);
+  });
+
+  // Global Ctrl+V paste
+  document.addEventListener('paste', (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const f = item.getAsFile();
+        if (f) {
+          e.preventDefault();
+          handleImageBlob(f);
+          return;
+        }
+      }
+    }
+  });
+}
+
 function wireUI() {
   const unlockAudio = () => audio.unlock();
   window.addEventListener('pointerup', unlockAudio, { once: true });
   window.addEventListener('touchend', unlockAudio, { once: true });
+
+  // WebGL2 Context Lost / Restored recovery (prevents blank screen after switching mobile apps!)
+  glCanvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+  });
+  glCanvas.addEventListener('webglcontextrestored', () => {
+    const maskSrc = state.step === 'paint' ? brush.canvas : brush.textureSource();
+    if (renderer.restoreContext(maskSrc)) {
+      state.needsRender = true;
+      afterViewChange();
+    }
+  });
+
+  // ResizeObserver on stageWrap (handles mobile browser address bar & orientation changes cleanly!)
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => {
+      if (renderer.resize()) afterViewChange();
+    }).observe(stageWrap);
+  }
+  window.addEventListener('resize', () => {
+    if (renderer.resize()) afterViewChange();
+  });
+
+  wireGlobalFileInputs();
 
   // 3-Step Tabs
   document.querySelectorAll('.step-tab').forEach((btn) => {
@@ -765,39 +1074,18 @@ function wireUI() {
   });
 
   // Reset View
-  $('btnResetView').addEventListener('click', () => renderer.resetView());
+  $('btnResetView').addEventListener('click', () => {
+    renderer.resetView(true);
+    state.needsRender = true;
+  });
 
   // Step 1: Add Image
   $('btnTrySample').addEventListener('click', () => selectSample(state.currentSample, 'play'));
   document.querySelectorAll('.sample-chip').forEach((chip) => {
     chip.addEventListener('click', () => selectSample(chip.dataset.sample, 'play'));
   });
-  $('fileInput').addEventListener('change', (e) => {
-    handleImageBlob(e.target.files[0]);
-    e.target.value = '';
-  });
 
-  const dz = $('dropzone');
-  dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
-  dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
-  dz.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dz.classList.remove('dragover');
-    handleImageBlob(e.dataTransfer.files[0]);
-  });
-
-  window.addEventListener('paste', (e) => {
-    const items = e.clipboardData && e.clipboardData.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type.startsWith('image/')) {
-        handleImageBlob(item.getAsFile());
-        break;
-      }
-    }
-  });
-
-  // Step 2: Paint Controls (Exact 1:1 Original MaskTool bindings + Undo/Redo)
+  // Step 2: Paint Controls (Exact 1:1 Original MaskTool + Fixed Integer Size Slider + Undo/Redo)
   const setErasing = (erasing) => {
     brush.erasing = erasing;
     $('toolBrush').classList.toggle('active', !erasing);
@@ -816,20 +1104,31 @@ function wireUI() {
   $('edgeSharp').addEventListener('click', () => setBrushType('hard'));
   $('edgeSoft').addEventListener('click', () => setBrushType('soft'));
 
-  $('brushSize').addEventListener('input', (e) => {
-    brush.brushRadius = parseFloat(e.target.value);
+  const handleBrushSizeChange = (e) => {
+    const raw = parseFloat(e.target.value);
+    if (!Number.isFinite(raw)) return;
+    // Integer range 10..200 maps cleanly to 0.010..0.200 isotropic radius (never peanut-locked!)
+    brush.brushRadius = Math.max(0.01, Math.min(0.20, raw / 1000));
     updateSliderFill(e.target);
     showBrushPreview(800);
-  });
+  };
+  $('brushSize').addEventListener('input', handleBrushSizeChange);
+  $('brushSize').addEventListener('change', handleBrushSizeChange);
 
-  $('btnUndo').addEventListener('click', () => brush.undo());
-  $('btnRedo').addEventListener('click', () => brush.redo());
+  $('btnUndo').addEventListener('click', () => {
+    if (brush.undo()) state.needsRender = true;
+  });
+  $('btnRedo').addEventListener('click', () => {
+    if (brush.redo()) state.needsRender = true;
+  });
   $('btnClearMask').addEventListener('click', () => {
     brush.clear(true);
+    state.needsRender = true;
     showToast('Cleared painted areas', 1800);
   });
   $('btnAllSquishy').addEventListener('click', () => {
     brush.fillAll(state.artworkSource, true);
+    state.needsRender = true;
     showToast('Made whole character squishy!', 1800);
   });
   $('btnDonePaint').addEventListener('click', () => setStep('play'));
@@ -862,6 +1161,7 @@ function wireUI() {
   $('btnHudJiggle').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
     audio.playRelease(0.65, physics.params.releaseFreq);
+    state.needsRender = true;
   });
   motion.onStatusChange = (msg) => showToast(msg, 3200);
 
@@ -890,6 +1190,7 @@ function wireUI() {
       syncSlidersFromPhysics();
       document.querySelectorAll('.preset-pill').forEach((p) => p.classList.toggle('active', p === pill));
       physics.triggerJiggle(0.55);
+      state.needsRender = true;
     });
   });
 
@@ -897,6 +1198,7 @@ function wireUI() {
     physics.setSoftness(parseFloat(e.target.value));
     syncSlidersFromPhysics();
     document.querySelectorAll('.preset-pill').forEach((p) => p.classList.remove('active'));
+    state.needsRender = true;
   });
 
   const bindFloat = (id, fn) => {
@@ -904,6 +1206,7 @@ function wireUI() {
       fn(parseFloat(e.target.value));
       updateSliderFill(e.target);
       document.querySelectorAll('.preset-pill').forEach((p) => p.classList.remove('active'));
+      state.needsRender = true;
     });
   };
   bindFloat('optGrab', (v) => physics.setParams({ radius: v }));
@@ -915,11 +1218,15 @@ function wireUI() {
 
   $('optMotionTilt').addEventListener('change', (e) => { motion.tiltEnabled = e.target.checked; });
   $('optMotionShake').addEventListener('change', (e) => { motion.shakeEnabled = e.target.checked; });
-  $('optShading').addEventListener('change', (e) => { renderer.shadingEnabled = e.target.checked; });
+  $('optShading').addEventListener('change', (e) => {
+    renderer.shadingEnabled = e.target.checked;
+    state.needsRender = true;
+  });
   $('optVpad').addEventListener('change', (e) => setVirtualPadOpen(e.target.checked));
   $('btnTestJiggle').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
     audio.playRelease(0.65, physics.params.releaseFreq);
+    state.needsRender = true;
   });
 
   $('btnResetPhysics').addEventListener('click', () => {
@@ -928,6 +1235,7 @@ function wireUI() {
     document.querySelectorAll('.preset-pill').forEach((p) => {
       p.classList.toggle('active', p.dataset.preset === 'real');
     });
+    state.needsRender = true;
     showToast('Reset to original mochi feel', 1800);
   });
 
@@ -940,12 +1248,12 @@ function wireUI() {
   const updateGifNote = () => {
     const el = $('gifRecordNote');
     if (!state.gifHighFpsEnabled) {
-      el.textContent = 'Lightweight 15 FPS GIF (up to 6 seconds).';
+      el.textContent = 'Adaptive 256-color 15 FPS GIF encoded in a Web Worker (up to 6s).';
     } else if (state.gifHighFps > 50) {
-      el.textContent = `${state.gifHighFps} FPS engine capture (up to 4s; uses 20ms GIF89a floor for universal browser playback).`;
+      el.textContent = `${state.gifHighFps} FPS adaptive GIF (up to 4s; uses 20ms GIF89a floor for universal browser playback).`;
     } else {
       const secs = state.gifHighFps > 30 ? 4 : 6;
-      el.textContent = `Smooth ${state.gifHighFps} FPS GIF directly from engine (up to ${secs} seconds).`;
+      el.textContent = `Smooth ${state.gifHighFps} FPS adaptive 256-color GIF encoded in a Web Worker (up to ${secs}s).`;
     }
   };
 
@@ -1004,11 +1312,6 @@ function wireUI() {
   });
   $('optGifFps').addEventListener('input', (e) => setGifFps(e.target.value));
   updateGifNote();
-
-  window.addEventListener('resize', () => {
-    renderer.resize();
-    updateBrushCursorSize();
-  });
 }
 
 // ============================================================================
@@ -1018,6 +1321,7 @@ async function boot() {
   try {
     await renderer.init();
   } catch (err) {
+    $('fatalCard').classList.remove('hidden');
     showToast(err.message, 6000);
     return;
   }
@@ -1026,6 +1330,7 @@ async function boot() {
   wireUI();
   initVirtualPad();
   syncSlidersFromPhysics();
+  syncBrushSizeSlider();
   updateSoundUI();
   refreshAllSliderFills();
 
