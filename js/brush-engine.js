@@ -85,6 +85,14 @@ export class BrushEngine {
     // Live cursor & size-slider preview ring (CSS coordinates)
     this.cursor = { visible: false, x: 0, y: 0, screenRadius: 30, isSizePreview: false };
 
+    // Blurred opaque grayscale mask for GPU R8 texture & CPU grab sampling (exact 0.008*size blur)
+    this.blurMaskCanvas = document.createElement('canvas');
+    this.blurMaskCanvas.width = maskSize;
+    this.blurMaskCanvas.height = maskSize;
+    this.blurMaskCtx = this.blurMaskCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
+    this._blurDirty = true;
+    this._blurData = null;
+
     this._lastTheme = 'light';
     this._previewDirty = true;
 
@@ -130,7 +138,7 @@ export class BrushEngine {
     this.maskCtx.putImageData(this.undoStack.pop(), 0, 0);
     this._previewDirty = true;
     this._emitHistory();
-    if (this.onMaskCommit) this.onMaskCommit(this.maskCanvas);
+    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
     return true;
   }
 
@@ -140,7 +148,7 @@ export class BrushEngine {
     this.maskCtx.putImageData(this.redoStack.pop(), 0, 0);
     this._previewDirty = true;
     this._emitHistory();
-    if (this.onMaskCommit) this.onMaskCommit(this.maskCanvas);
+    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
     return true;
   }
 
@@ -149,7 +157,7 @@ export class BrushEngine {
     this.maskCtx.clearRect(0, 0, this.maskSize, this.maskSize);
     this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
     this._previewDirty = true;
-    if (this.onMaskCommit) this.onMaskCommit(this.maskCanvas);
+    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
   }
 
   hasAnyPaint() {
@@ -165,13 +173,45 @@ export class BrushEngine {
     this.maskCtx.clearRect(0, 0, this.maskSize, this.maskSize);
     this.maskCtx.drawImage(srcCanvas, 0, 0, this.maskSize, this.maskSize);
     this._previewDirty = true;
-    if (this.onMaskCommit) this.onMaskCommit(this.maskCanvas);
+    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
   }
 
   resetHistory() {
     this.undoStack.length = 0;
     this.redoStack.length = 0;
     this._emitHistory();
+  }
+
+  /** Build blurred grayscale mask canvas (black = fixed, white = squishy) matching original maskBlur=0.008 */
+  getBlurredMaskCanvas() {
+    if (!this._blurDirty) return this.blurMaskCanvas;
+    const S = this.maskSize;
+    const blurPx = Math.max(2, Math.round(S * 0.008));
+    const ctx = this.blurMaskCtx;
+    ctx.filter = 'none';
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, S, S);
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(this.maskCanvas, 0, 0);
+    ctx.filter = 'none';
+    this._blurDirty = false;
+    this._blurData = null;
+    return this.blurMaskCanvas;
+  }
+
+  sampleBlurred = (u, v) => {
+    if (this._blurDirty || !this._blurData) {
+      this.getBlurredMaskCanvas();
+      this._blurData = this.blurMaskCtx.getImageData(0, 0, this.maskSize, this.maskSize);
+    }
+    const { data, width, height } = this._blurData;
+    const ix = Math.min(width - 1, Math.max(0, Math.round(u * (width - 1))));
+    const iy = Math.min(height - 1, Math.max(0, Math.round(v * (height - 1))));
+    return data[(iy * width + ix) * 4] / 255;
+  };
+
+  uvToMask(u, v) {
+    return { x: u * this.maskSize, y: v * this.maskSize };
   }
 
   worldToMask(wx, wy, hw, hh) {
@@ -290,7 +330,7 @@ export class BrushEngine {
     this.strokeCtx.clearRect(0, 0, this.maskSize, this.maskSize);
     this._previewDirty = true;
 
-    if (this.onMaskCommit) this.onMaskCommit(this.maskCanvas);
+    this._blurDirty = true; this._blurData = null; if (this.onMaskCommit) this.onMaskCommit(this.getBlurredMaskCanvas());
   }
 
   /** Cancel an active stroke losslessly (used when a 2nd finger initiates Pinch-Zoom!) */

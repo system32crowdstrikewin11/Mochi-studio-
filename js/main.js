@@ -1,13 +1,18 @@
 /**
- * Mochi Studio v15 — Main Application Controller
- * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint mode AND Play mode!
- * - Zero-chaos Viscoelastic Navier-Cauchy Mochi Physics
- * - Clipboard Ctrl+V image paste + Drag & Drop + 4 Built-in Samples
- * - Optional Phone Motion Sensors + Virtual Tilt Pad
- * - Video (WebM) AND Animated GIF export!
+ * Mochi Studio v16 — Main Application Controller
+ * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
+ * - Exact 1:1 Original Synthesized Web Audio (Grab puff + Wobble-synced Release boing)
+ * - Zero-Lag Spotlight-Reveal Brush (Sharp / Soft, Undo / Redo, Zoom-adaptive Size)
+ * - Smooth 2-finger Pinch-Zoom & Pan in BOTH Paint & Play Modes
+ * - Optional Phone Motion Sensors (Tilt gravity + Shake jiggle) + Virtual Tilt Pad
+ * - Direct Engine Video Recording (60 / 90 / 120 / Custom FPS) & Optional High-FPS GIF (up to 60 FPS)
  */
 
-import { MochiPhysicsContinuum } from './physics-continuum.js';
+import {
+  MochiPhysicsContinuum,
+  zetaFromWobble,
+  wobbleFromZeta,
+} from './physics-continuum.js';
 import { MochiRendererWebGL2 } from './renderer-webgl2.js';
 import { BrushEngine } from './brush-engine.js';
 import { MotionSensorManager } from './motion-sensors.js';
@@ -22,7 +27,7 @@ const state = {
   currentSample: 'bear',
   artworkSource: null,
 
-  // Active pointers: Map<pointerId, { clientX, clientY, role: 'grab'|'bg'|'paint' }>
+  // Active pointers: Map<pointerId, { clientX, clientY, prevIsoX, prevIsoY, currIsoX, currIsoY, role, pointerType }>
   activeTouches: new Map(),
   pinchState: null,
   sizePreviewTimer: null,
@@ -39,7 +44,7 @@ const state = {
   lastFrameTime: performance.now(),
 };
 
-const physics = new MochiPhysicsContinuum(44);
+const physics = new MochiPhysicsContinuum();
 const glCanvas = $('glCanvas');
 const overlayCanvas = $('overlayCanvas');
 const overlayCtx = overlayCanvas.getContext('2d');
@@ -48,6 +53,9 @@ const brush = new BrushEngine(512);
 const motion = new MotionSensorManager();
 const audio = new SquishAudio();
 const recorder = new EngineRecorder();
+
+// Connect physics mask sampler to BrushEngine's exact blurred mask
+physics.maskSample = brush.sampleBlurred;
 
 // ============================================================================
 // Toast Banner
@@ -86,27 +94,25 @@ function setStep(nextStep) {
   $('dockPlay').classList.toggle('hidden', nextStep !== 'play');
   $('btnResetView').classList.toggle('hidden', nextStep === 'image');
 
-  // Clear active interactions cleanly
   state.activeTouches.clear();
   state.pinchState = null;
   brush.cancelStroke();
-  physics.handles.clear();
+  physics.resetPose();
 
   if (nextStep === 'paint') {
-    physics.resetPose();
     $('motionHud').classList.add('hidden');
     brush.markPreviewDirty();
     showCenterBrushPreview(1100);
   } else if (nextStep === 'play') {
-    // If nothing was painted, automatically make the whole image squishy (just like original!)
     if (!brush.hasAnyPaint()) {
-      physics.setWholeImageSquishy();
+      physics.maskEnabled = false;
       if (!state._suppressEmptyToast) {
         showToast('Nothing was painted, so the whole image is squishy', 2800);
       }
       state._suppressEmptyToast = false;
     } else {
-      physics.updateMaskFromCanvas(brush.maskCanvas);
+      physics.maskEnabled = true;
+      renderer.uploadMask(brush.getBlurredMaskCanvas());
     }
     brush.cursor.visible = false;
     updateMotionHud();
@@ -123,16 +129,14 @@ function loadArtwork(imgOrCanvas) {
   const aspect = w / h;
 
   physics.setAspect(aspect);
-  physics.updateArtworkHitMask(imgOrCanvas);
+  physics.updateArtworkAlphaSampler(imgOrCanvas);
   brush.setArtworkSource(imgOrCanvas);
   renderer.uploadTexture(imgOrCanvas);
   renderer.resetView();
 
-  // Start with a clean unpainted canvas so user can paint ONLY chosen parts,
-  // OR hit Play right away to make the whole image squishy!
   brush.resetHistory();
   brush.clear(false);
-  physics.setWholeImageSquishy();
+  physics.maskEnabled = false;
 }
 
 function selectSample(key, goStep = null, silentToast = false) {
@@ -179,7 +183,6 @@ function getPinchPointers() {
   if (state.step === 'paint') {
     return Array.from(state.activeTouches.values());
   }
-  // In Play mode, fingers touching outside the character (role === 'bg') control camera Zoom & Pan!
   return Array.from(state.activeTouches.values()).filter((p) => p.role === 'bg');
 }
 
@@ -187,16 +190,16 @@ function startTwoFingerPinch() {
   const pts = getPinchPointers();
   if (pts.length < 2) return;
   const [p1, p2] = pts;
-  const midX = (p1.clientX + p2.clientX) * 0.5;
-  const midY = (p1.clientY + p2.clientY) * 0.5;
+  const midClientX = (p1.clientX + p2.clientX) * 0.5;
+  const midClientY = (p1.clientY + p2.clientY) * 0.5;
   const dist = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
-  const worldMid = renderer.screenToWorld(midX, midY);
+  const anchorIso = renderer.isoFromClient(midClientX, midClientY);
 
   state.pinchState = {
     startDist: Math.max(12, dist),
     startZoom: renderer.zoom,
-    anchorWorldX: worldMid.x,
-    anchorWorldY: worldMid.y,
+    anchorIsoX: anchorIso.x,
+    anchorIsoY: anchorIso.y,
   };
 }
 
@@ -204,26 +207,19 @@ function updateTwoFingerPinch() {
   const pts = getPinchPointers();
   if (pts.length < 2 || !state.pinchState) return;
   const [p1, p2] = pts;
-  const midX = (p1.clientX + p2.clientX) * 0.5;
-  const midY = (p1.clientY + p2.clientY) * 0.5;
+  const midClientX = (p1.clientX + p2.clientX) * 0.5;
+  const midClientY = (p1.clientY + p2.clientY) * 0.5;
   const dist = Math.hypot(p2.clientX - p1.clientX, p2.clientY - p1.clientY);
 
-  const newZoom = Math.max(0.45, Math.min(4.5, state.pinchState.startZoom * (dist / state.pinchState.startDist)));
-  const rect = glCanvas.getBoundingClientRect();
-  const nx = ((midX - rect.left) / rect.width) * 2 - 1;
-  const ny = ((midY - rect.top) / rect.height) * 2 - 1;
-  const [sx, sy] = renderer.getScaleXY();
-
-  // Keep pinched world point locked directly beneath the user's fingers!
-  const newPanX = nx / sx - state.pinchState.anchorWorldX * newZoom;
-  const newPanY = ny / sy - state.pinchState.anchorWorldY * newZoom;
-  renderer.setViewImmediate(newZoom, newPanX, newPanY);
+  const newZoom = state.pinchState.startZoom * (dist / state.pinchState.startDist);
+  const midPx = renderer.canvasPxFromClient(midClientX, midClientY);
+  renderer.setViewAnchored(newZoom, state.pinchState.anchorIsoX, state.pinchState.anchorIsoY, midPx.x, midPx.y);
 }
 
-/** Convert current screen-space brush radius (CSS px) into mask-canvas pixels for zoom-adaptive precision! */
+/** Convert current screen-space brush radius (CSS px) into mask-canvas pixels for zoom-adaptive precision */
 function getCurrentMaskRadius() {
-  const topLeft = renderer.worldToScreen(-physics.hw, -physics.hh);
-  const botRight = renderer.worldToScreen(physics.hw, physics.hh);
+  const topLeft = renderer.screenFromIso(0, 0);
+  const botRight = renderer.screenFromIso(renderer.aspect, 1);
   const drawW = Math.max(24, botRight.x - topLeft.x);
   return (brush.screenRadius / drawW) * brush.maskSize;
 }
@@ -263,23 +259,33 @@ function updateBrushCursor(clientX, clientY) {
 // ============================================================================
 glCanvas.addEventListener('pointerdown', (e) => {
   if (state.step === 'image') return;
-  glCanvas.setPointerCapture(e.pointerId);
-  const w = renderer.screenToWorld(e.clientX, e.clientY);
+  try { glCanvas.setPointerCapture(e.pointerId); } catch {}
+  const iso = renderer.isoFromClient(e.clientX, e.clientY);
 
   if (state.step === 'play') {
-    const grabbed = physics.pointerDown(e.pointerId, w.x, w.y);
-    const role = grabbed ? 'grab' : 'bg';
-    state.activeTouches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY, prevWX: w.x, prevWY: w.y, currWX: w.x, currWY: w.y, role, pointerType: e.pointerType });
+    const grab = physics.tryGrab(e.pointerId, iso.x, iso.y);
+    const role = grab ? 'grab' : 'bg';
+    state.activeTouches.set(e.pointerId, {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      prevIsoX: iso.x,
+      prevIsoY: iso.y,
+      currIsoX: iso.x,
+      currIsoY: iso.y,
+      role,
+      pointerType: e.pointerType,
+    });
 
-    if (grabbed) {
-      audio.playPuni(0.55, true);
+    if (grab) {
+      audio.playGrab();
     } else if (getPinchPointers().length >= 2) {
+      physics.releaseAllActive();
       startTwoFingerPinch();
     }
     return;
   }
 
-  // PAINT MODE — Instant zero-lag stroke start + lossless 2-finger pinch cancellation!
+  // PAINT MODE — Instant zero-lag stroke start + lossless 2-finger pinch cancellation
   state.activeTouches.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY, role: 'paint' });
 
   if (state.activeTouches.size >= 2) {
@@ -296,7 +302,8 @@ glCanvas.addEventListener('pointerdown', (e) => {
   }
 
   updateBrushCursor(e.clientX, e.clientY);
-  const m = brush.worldToMask(w.x, w.y, physics.hw, physics.hh);
+  const uv = renderer.restUvFromIso(iso.x, iso.y);
+  const m = brush.uvToMask(Math.min(1, Math.max(0, uv.x)), Math.min(1, Math.max(0, uv.y)));
   brush.beginStroke(m.x, m.y, getCurrentMaskRadius());
 });
 
@@ -310,13 +317,13 @@ glCanvas.addEventListener('pointermove', (e) => {
 
   if (state.step === 'play') {
     if (rec.role === 'grab') {
-      const w = renderer.screenToWorld(e.clientX, e.clientY);
-      rec.currWX = w.x;
-      rec.currWY = w.y;
+      const iso = renderer.isoFromClient(e.clientX, e.clientY);
+      rec.currIsoX = iso.x;
+      rec.currIsoY = iso.y;
       if (!recorder.isRecording) {
-        rec.prevWX = w.x;
-        rec.prevWY = w.y;
-        physics.pointerMove(e.pointerId, w.x, w.y);
+        rec.prevIsoX = iso.x;
+        rec.prevIsoY = iso.y;
+        physics.move(e.pointerId, iso.x, iso.y);
       }
     } else if (getPinchPointers().length >= 2) {
       updateTwoFingerPinch();
@@ -330,19 +337,14 @@ glCanvas.addEventListener('pointermove', (e) => {
       return;
     }
     if (brush.isDrawing) {
-      // Use coalesced high-rate events when supported for silky-smooth curves on fast swipes!
       const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : null;
-      if (events && events.length > 0) {
-        for (let i = 0; i < events.length; i++) {
-          const ce = events[i];
-          const cw = renderer.screenToWorld(ce.clientX, ce.clientY);
-          const cm = brush.worldToMask(cw.x, cw.y, physics.hw, physics.hh);
-          brush.moveStroke(cm.x, cm.y);
-        }
-      } else {
-        const w = renderer.screenToWorld(e.clientX, e.clientY);
-        const m = brush.worldToMask(w.x, w.y, physics.hw, physics.hh);
-        brush.moveStroke(m.x, m.y);
+      const list = events && events.length > 0 ? events : [e];
+      for (let i = 0; i < list.length; i++) {
+        const ce = list[i];
+        const cIso = renderer.isoFromClient(ce.clientX, ce.clientY);
+        const uv = renderer.restUvFromIso(cIso.x, cIso.y);
+        const cm = brush.uvToMask(Math.min(1, Math.max(0, uv.x)), Math.min(1, Math.max(0, uv.y)));
+        brush.moveStroke(cm.x, cm.y);
       }
     }
   }
@@ -354,9 +356,10 @@ function handlePointerEnd(e) {
 
   if (state.step === 'play') {
     if (rec && rec.role === 'grab') {
-      const pullMag = physics.getHandlePullIntensity(e.pointerId);
-      physics.pointerUp(e.pointerId);
-      audio.playPuni(Math.min(1, pullMag * 0.85 + physics.peakStrain * 0.25), false);
+      const g = physics.release(e.pointerId);
+      if (g) {
+        audio.playRelease(physics.intensityOf(g), physics.params.releaseFreq);
+      }
     }
     if (getPinchPointers().length < 2) {
       state.pinchState = null;
@@ -383,24 +386,18 @@ glCanvas.addEventListener('pointerleave', () => {
   if (state.activeTouches.size === 0) brush.cursor.visible = false;
 });
 
-// Desktop wheel zoom anchored around mouse cursor!
+// Desktop wheel zoom anchored directly under mouse cursor
 glCanvas.addEventListener('wheel', (e) => {
   if (state.step === 'image') return;
   e.preventDefault();
-  const before = renderer.screenToWorld(e.clientX, e.clientY);
-  const factor = Math.exp(-e.deltaY * 0.0014);
-  const newZoom = Math.max(0.45, Math.min(4.5, renderer.zoom * factor));
-  const rect = glCanvas.getBoundingClientRect();
-  const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-  const ny = ((e.clientY - rect.top) / rect.height) * 2 - 1;
-  const [sx, sy] = renderer.getScaleXY();
-  const newPanX = nx / sx - before.x * newZoom;
-  const newPanY = ny / sy - before.y * newZoom;
-  renderer.setViewImmediate(newZoom, newPanX, newPanY);
+  const anchorIso = renderer.isoFromClient(e.clientX, e.clientY);
+  const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
+  const px = renderer.canvasPxFromClient(e.clientX, e.clientY);
+  renderer.setViewAnchored(renderer.zoom * factor, anchorIso.x, anchorIso.y, px.x, px.y);
 }, { passive: false });
 
 // ============================================================================
-// 2D Overlay Rendering (Paint Mask, Brush Ring, Subtle Play Touch Rings)
+// 2D Overlay Rendering (Paint Mask Spotlight-Reveal & Cursor Ring)
 // ============================================================================
 function renderOverlay() {
   const w = renderer.cssWidth;
@@ -416,8 +413,8 @@ function renderOverlay() {
 
   if (state.step === 'paint') {
     const theme = document.documentElement.getAttribute('data-theme') || 'light';
-    const topLeft = renderer.worldToScreen(-physics.hw, -physics.hh);
-    const botRight = renderer.worldToScreen(physics.hw, physics.hh);
+    const topLeft = renderer.screenFromIso(0, 0);
+    const botRight = renderer.screenFromIso(renderer.aspect, 1);
     const drawW = botRight.x - topLeft.x;
     const drawH = botRight.y - topLeft.y;
     overlayCtx.imageSmoothingEnabled = true;
@@ -464,7 +461,7 @@ function renderOverlay() {
 }
 
 // ============================================================================
-// Main Loop
+// Main Loop (with Direct Engine-Stepped High-FPS Recording Pipeline!)
 // ============================================================================
 function tick(now) {
   const dt = Math.min(0.05, Math.max(0.001, (now - state.lastFrameTime) / 1000));
@@ -487,8 +484,7 @@ function tick(now) {
       state.recAccum += dt;
 
       if (targetFps >= 45) {
-        // High-FPS Engine Lock (60 / 90 / 120 / Custom >= 45 FPS):
-        // Step physics & render directly at exact 1/targetFps intervals with sub-frame finger interpolation!
+        // High-FPS Engine Lock (60 / 90 / 120 / Custom >= 45 FPS) with sub-frame finger interpolation
         let steps = Math.floor(state.recAccum / stepDt);
         if (steps > 8) {
           steps = 8;
@@ -502,9 +498,9 @@ function tick(now) {
             const alpha = s / steps;
             for (const [pid, pt] of state.activeTouches.entries()) {
               if (pt.role === 'grab') {
-                const ix = pt.prevWX + (pt.currWX - pt.prevWX) * alpha;
-                const iy = pt.prevWY + (pt.currWY - pt.prevWY) * alpha;
-                physics.pointerMove(pid, ix, iy);
+                const ix = pt.prevIsoX + (pt.currIsoX - pt.prevIsoX) * alpha;
+                const iy = pt.prevIsoY + (pt.currIsoY - pt.prevIsoY) * alpha;
+                physics.move(pid, ix, iy);
               }
             }
             physics.step(stepDt);
@@ -517,21 +513,20 @@ function tick(now) {
           }
           for (const pt of state.activeTouches.values()) {
             if (pt.role === 'grab') {
-              pt.prevWX = pt.currWX;
-              pt.prevWY = pt.currWY;
+              pt.prevIsoX = pt.currIsoX;
+              pt.prevIsoY = pt.currIsoY;
             }
           }
         } else {
           renderer.render();
         }
       } else {
-        // Lower-FPS Engine Capture (e.g. 15/24/30 FPS GIF or custom <45 FPS Video):
-        // Keep display physics silky smooth while capturing exact 1/targetFps engine snapshots!
+        // Lower-FPS Engine Capture (15/24/30 FPS GIF or <45 FPS Custom Video)
         for (const [pid, pt] of state.activeTouches.entries()) {
           if (pt.role === 'grab') {
-            pt.prevWX = pt.currWX;
-            pt.prevWY = pt.currWY;
-            physics.pointerMove(pid, pt.currWX, pt.currWY);
+            pt.prevIsoX = pt.currIsoX;
+            pt.prevIsoY = pt.currIsoY;
+            physics.move(pid, pt.currIsoX, pt.currIsoY);
           }
         }
         physics.step(dt);
@@ -552,7 +547,6 @@ function tick(now) {
         }
       }
 
-      // Live engine recording timer badge
       const sec = Math.floor(recorder.getElapsedSeconds());
       const mm = String(Math.floor(sec / 60)).padStart(2, '0');
       const ss = String(sec % 60).padStart(2, '0');
@@ -690,7 +684,7 @@ function initVirtualPad() {
 
   $('btnVpadShake').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
-    audio.playPuni(0.65, true);
+    audio.playRelease(0.65, physics.params.releaseFreq);
   });
   $('btnCloseVpad').addEventListener('click', () => setVirtualPadOpen(false));
 }
@@ -726,10 +720,10 @@ function updateSoundUI() {
 // ============================================================================
 function updateSliderFill(el) {
   if (!el) return;
-  const min = Number(el.min) || 0;
-  const max = Number(el.max) || 100;
-  const val = Number(el.value) || 0;
-  const pct = ((val - min) / Math.max(1, max - min)) * 100;
+  const min = parseFloat(el.min) || 0;
+  const max = parseFloat(el.max) || 100;
+  const val = parseFloat(el.value) || 0;
+  const pct = ((val - min) / Math.max(1e-6, max - min)) * 100;
   el.style.setProperty('--pct', `${pct}%`);
 }
 
@@ -739,18 +733,22 @@ function refreshAllSliderFills() {
 
 function syncSlidersFromPhysics() {
   const p = physics.params;
-  $('optSoftness').value = p.softness;
-  $('optGrab').value = p.grab;
-  $('optStretch').value = p.stretch;
-  $('optWobbleSpeed').value = p.wobbleSpeed;
-  $('optWobbles').value = p.wobbles;
-  $('optPuffiness').value = p.puffiness;
-  $('optFirmness').value = p.yieldFirmness;
-  $('optMotion').value = p.motion;
+  $('optSoftness').value = String(physics.softness);
+  $('optGrab').value = String(p.radius);
+  $('optStretch').value = String(p.stretch);
+  $('optWobbleSpeed').value = String(p.releaseFreq);
+  $('optWobbles').value = String(wobbleFromZeta(p.releaseZeta));
+  $('optPuffiness').value = String(p.bulge);
+  $('optMotion').value = String(p.motion ?? 58);
   refreshAllSliderFills();
 }
 
 function wireUI() {
+  // Unlock Web Audio cleanly on first user interaction (mobile Safari/Chrome requirement)
+  const unlockAudio = () => audio.unlock();
+  window.addEventListener('pointerup', unlockAudio, { once: true });
+  window.addEventListener('touchend', unlockAudio, { once: true });
+
   // 3-Step Tabs
   document.querySelectorAll('.step-tab').forEach((btn) => {
     btn.addEventListener('click', () => setStep(btn.dataset.step));
@@ -788,7 +786,7 @@ function wireUI() {
     handleImageBlob(e.dataTransfer.files[0]);
   });
 
-  // Global Ctrl+V clipboard image paste!
+  // Global Ctrl+V clipboard image paste
   window.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
@@ -842,8 +840,8 @@ function wireUI() {
     $('btnUndo').disabled = !canUndo;
     $('btnRedo').disabled = !canRedo;
   };
-  brush.onMaskCommit = (maskCanvas) => {
-    physics.updateMaskFromCanvas(maskCanvas);
+  brush.onMaskCommit = (blurredCanvas) => {
+    renderer.uploadMask(blurredCanvas);
   };
 
   // Step 3: Play Controls
@@ -868,7 +866,7 @@ function wireUI() {
   });
   $('btnHudJiggle').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
-    audio.playPuni(0.6, true);
+    audio.playRelease(0.65, physics.params.releaseFreq);
   });
   motion.onStatusChange = (msg) => showToast(msg, 3200);
 
@@ -876,6 +874,7 @@ function wireUI() {
   const openSettings = (open) => {
     $('settingsBackdrop').classList.toggle('hidden', !open);
     $('settingsSheet').classList.toggle('hidden', !open);
+    if (open) refreshAllSliderFills();
   };
   $('btnSettings').addEventListener('click', () => openSettings(true));
   $('btnCloseSettings').addEventListener('click', () => openSettings(false));
@@ -888,6 +887,7 @@ function wireUI() {
     box.classList.toggle('hidden', !willOpen);
     $('fineTuneArrow').textContent = willOpen ? '▾' : '▸';
     $('btnFineTune').setAttribute('aria-expanded', String(willOpen));
+    if (willOpen) refreshAllSliderFills();
   });
 
   // Presets
@@ -896,25 +896,30 @@ function wireUI() {
       physics.applyPreset(pill.dataset.preset);
       syncSlidersFromPhysics();
       document.querySelectorAll('.preset-pill').forEach((p) => p.classList.toggle('active', p === pill));
-      physics.triggerJiggle(0.6);
+      physics.triggerJiggle(0.55);
     });
   });
 
-  const bindRange = (id, key) => {
+  // Exact original Softness slider -> updates Stretch, Wobble speed, Wobbles automatically!
+  $('optSoftness').addEventListener('input', (e) => {
+    physics.setSoftness(parseFloat(e.target.value));
+    syncSlidersFromPhysics();
+    document.querySelectorAll('.preset-pill').forEach((p) => p.classList.remove('active'));
+  });
+
+  const bindFloat = (id, fn) => {
     $(id).addEventListener('input', (e) => {
-      physics.setParams({ [key]: Number(e.target.value) });
+      fn(parseFloat(e.target.value));
       updateSliderFill(e.target);
       document.querySelectorAll('.preset-pill').forEach((p) => p.classList.remove('active'));
     });
   };
-  bindRange('optSoftness', 'softness');
-  bindRange('optGrab', 'grab');
-  bindRange('optStretch', 'stretch');
-  bindRange('optWobbleSpeed', 'wobbleSpeed');
-  bindRange('optWobbles', 'wobbles');
-  bindRange('optPuffiness', 'puffiness');
-  bindRange('optFirmness', 'yieldFirmness');
-  bindRange('optMotion', 'motion');
+  bindFloat('optGrab', (v) => physics.setParams({ radius: v }));
+  bindFloat('optStretch', (v) => physics.setParams({ stretch: v }));
+  bindFloat('optWobbleSpeed', (v) => physics.setParams({ releaseFreq: v }));
+  bindFloat('optWobbles', (v) => physics.setParams({ releaseZeta: zetaFromWobble(v) }));
+  bindFloat('optPuffiness', (v) => physics.setParams({ bulge: v }));
+  bindFloat('optMotion', (v) => physics.setParams({ motion: v }));
 
   $('optMotionTilt').addEventListener('change', (e) => {
     motion.tiltEnabled = e.target.checked;
@@ -929,7 +934,7 @@ function wireUI() {
   $('optVpad').addEventListener('change', (e) => setVirtualPadOpen(e.target.checked));
   $('btnTestJiggle').addEventListener('click', () => {
     physics.triggerJiggle(1.0);
-    audio.playPuni(0.65, true);
+    audio.playRelease(0.65, physics.params.releaseFreq);
   });
 
   $('btnResetPhysics').addEventListener('click', () => {
@@ -938,7 +943,7 @@ function wireUI() {
     document.querySelectorAll('.preset-pill').forEach((p) => {
       p.classList.toggle('active', p.dataset.preset === 'real');
     });
-    showToast('Reset to default mochi feel', 1800);
+    showToast('Reset to original mochi feel', 1800);
   });
 
   $('optVolume').addEventListener('input', (e) => {

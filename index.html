@@ -241,13 +241,13 @@
       </div>
 
       <div class="sheet-body">
-        <!-- Squishiness -->
+        <!-- Squishiness (Exact 1:1 Original Physics Ranges) -->
         <div class="sheet-section">
           <div class="section-title">Squishiness</div>
 
           <div class="row-slider">
             <label for="optSoftness">Softness</label>
-            <input type="range" id="optSoftness" min="10" max="100" value="52" />
+            <input type="range" id="optSoftness" min="0" max="1" step="0.01" value="0.5" />
           </div>
 
           <button id="btnFineTune" class="finetune-toggle" aria-expanded="false">
@@ -256,7 +256,7 @@
 
           <div id="fineTuneBox" class="finetune-box hidden">
             <div class="preset-pills preset-grid-4">
-              <button class="preset-pill active" data-preset="real">Real Mochi</button>
+              <button class="preset-pill active" data-preset="real">Original Mochi</button>
               <button class="preset-pill" data-preset="daifuku">Soft Daifuku</button>
               <button class="preset-pill" data-preset="flan">Jiggly Flan</button>
               <button class="preset-pill" data-preset="firm">Firm Dough</button>
@@ -264,32 +264,27 @@
 
             <div class="row-slider">
               <label for="optGrab">Grab area</label>
-              <input type="range" id="optGrab" min="15" max="100" value="52" />
+              <input type="range" id="optGrab" min="0.08" max="0.40" step="0.005" value="0.22" />
             </div>
 
             <div class="row-slider">
               <label for="optStretch">Stretch</label>
-              <input type="range" id="optStretch" min="15" max="100" value="56" />
+              <input type="range" id="optStretch" min="0.30" max="1.00" step="0.01" value="0.55" />
             </div>
 
             <div class="row-slider">
               <label for="optWobbleSpeed">Wobble speed</label>
-              <input type="range" id="optWobbleSpeed" min="15" max="100" value="54" />
+              <input type="range" id="optWobbleSpeed" min="6" max="13" step="0.1" value="9" />
             </div>
 
             <div class="row-slider">
               <label for="optWobbles">Wobbles</label>
-              <input type="range" id="optWobbles" min="0" max="95" value="56" />
+              <input type="range" id="optWobbles" min="0" max="1" step="0.01" value="0.64" />
             </div>
 
             <div class="row-slider">
               <label for="optPuffiness">Puffiness</label>
-              <input type="range" id="optPuffiness" min="0" max="100" value="52" />
-            </div>
-
-            <div class="row-slider">
-              <label for="optFirmness">Yield firmness</label>
-              <input type="range" id="optFirmness" min="0" max="100" value="52" />
+              <input type="range" id="optPuffiness" min="0" max="0.25" step="0.005" value="0.10" />
             </div>
 
             <label class="toggle-row">
@@ -332,7 +327,7 @@
           <div class="section-title">Sound</div>
           <div class="row-slider">
             <label for="optVolume">Volume</label>
-            <input type="range" id="optVolume" min="0" max="100" value="55" />
+            <input type="range" id="optVolume" min="0" max="100" value="70" />
           </div>
         </div>
 

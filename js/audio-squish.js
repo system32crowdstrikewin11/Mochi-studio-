@@ -1,18 +1,52 @@
 /**
- * SquishAudio v15 — Organic Tactile Mochi "Bup / Boing" Web Audio Synthesizer
+ * SquishAudio v16 — Exact 1:1 Original Mochi Web Audio Synthesizer
  *
- * Replaces flat pure-sine whistles with warm, percussive mochi sound design:
- * - Touch/Grab: short muted low-mid "bup" cushion pop (135 -> 225 Hz)
- * - Snap-Back Release: stretch-scaled bouncy "boing-boing" with warm resonance
- *   and pitch-wobble matching the visual elastic rebound!
+ * - Grab:    sine 185 -> 130 Hz (90ms) + 500 Hz lowpass white noise cushion puff (60ms)
+ * - Release: sine 240 -> 165 Hz (300ms) amplitude-modulated at the exact visual
+ *            wobble frequency (`releaseFreq` Hz) so audio & visual wobble match 1:1!
  */
 
 export class SquishAudio {
   constructor() {
     this.ctx = null;
-    this.enabled = false;
-    this.volume = 0.55; // 0..1
-    this.lastPuniTime = 0;
+    this.master = null;
+    this.enabled = true; // Active by default (unlocks cleanly on first touch, toggleable anytime)
+    this.volume = 0.70;  // Exact original default volume (0.7)
+  }
+
+  _ensure() {
+    if (!this.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try {
+        this.ctx = new AC();
+        this.master = this.ctx.createGain();
+        this.master.connect(this.ctx.destination);
+      } catch {
+        return null;
+      }
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+    if (this.master) {
+      this.master.gain.value = this.enabled ? this.volume : 0;
+    }
+    return this.ctx;
+  }
+
+  unlock() {
+    const ctx = this._ensure();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = ctx.createBuffer(1, 1, 22050);
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {
+      // ignore
+    }
   }
 
   setVolume(norm) {
@@ -22,107 +56,96 @@ export class SquishAudio {
     } else if (this.volume === 0) {
       this.enabled = false;
     }
+    if (this.master) {
+      this.master.gain.value = this.enabled ? this.volume : 0;
+    }
   }
 
   toggle() {
     this.enabled = !this.enabled;
     if (this.enabled) {
-      if (this.volume < 0.05) this.volume = 0.55;
-      this._ensureContext();
-      this.playPuni(0.55, false);
+      if (this.volume < 0.05) this.volume = 0.70;
+      this._ensure();
+      this.playGrab();
+    } else if (this.master) {
+      this.master.gain.value = 0;
     }
     return this.enabled;
   }
 
-  _ensureContext() {
-    if (!this.ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC) this.ctx = new AC();
-    }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
-    }
+  _noiseSource(ctx, durSec) {
+    const len = Math.ceil(ctx.sampleRate * durSec);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    return src;
   }
 
-  playPuni(intensity = 0.5, isGrab = true) {
+  /** Exact original grab sound: soft sine dip + filtered cushion noise puff */
+  playGrab() {
     if (!this.enabled || this.volume <= 0.005) return;
-    this._ensureContext();
-    if (!this.ctx) return;
+    const ctx = this._ensure();
+    if (!ctx) return;
 
-    const now = this.ctx.currentTime;
-    if (now - this.lastPuniTime < 0.055) return;
-    this.lastPuniTime = now;
+    const t = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(185, t);
+    osc.frequency.exponentialRampToValueAtTime(130, t + 0.09);
 
-    const clamped = Math.max(0.08, Math.min(1.0, intensity));
+    const g1 = ctx.createGain();
+    g1.gain.setValueAtTime(0, t);
+    g1.gain.linearRampToValueAtTime(0.30, t + 0.008);
+    g1.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    osc.connect(g1).connect(this.master);
+    osc.start(t);
+    osc.stop(t + 0.14);
 
-    if (isGrab) {
-      // Soft muted low-mid "bup" cushion touch
-      const vol = Math.min(0.24, (0.09 + clamped * 0.12) * this.volume);
-      const osc = this.ctx.createOscillator();
-      const filter = this.ctx.createBiquadFilter();
-      const gain = this.ctx.createGain();
+    const noise = this._noiseSource(ctx, 0.06);
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 500;
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.10, t);
+    g2.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    noise.connect(lp).connect(g2).connect(this.master);
+    noise.start(t);
+  }
 
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(132 + clamped * 28, now);
-      osc.frequency.exponentialRampToValueAtTime(215 + clamped * 45, now + 0.055);
+  /** Exact original release wobble sound synced to releaseFreq (Hz)! */
+  playRelease(intensity, releaseFreq = 9.0) {
+    if (!this.enabled || this.volume <= 0.005 || intensity < 0.05) return;
+    const ctx = this._ensure();
+    if (!ctx) return;
 
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(460, now);
-      filter.Q.setValueAtTime(1.8, now);
+    const t = ctx.currentTime;
+    const peakGain = 0.12 + 0.30 * Math.min(1, intensity);
 
-      gain.gain.setValueAtTime(0.001, now);
-      gain.gain.linearRampToValueAtTime(vol, now + 0.009);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.072);
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(240, t);
+    osc.frequency.exponentialRampToValueAtTime(165, t + 0.30);
 
-      osc.connect(filter);
-      filter.connect(gain);
-      gain.connect(this.ctx.destination);
-      osc.start(now);
-      osc.stop(now + 0.08);
-      return;
-    }
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(peakGain, t);
+    env.gain.exponentialRampToValueAtTime(0.001, t + 0.40);
 
-    // Crisp elastic "boing-boing" snap-back scaled by actual pull stretch!
-    if (clamped < 0.14) return; // skip boing on tiny zero-stretch tap
+    const am = ctx.createGain();
+    am.gain.setValueAtTime(1.0, t);
 
-    const vol = Math.min(0.32, (0.09 + clamped * 0.22) * this.volume);
-    const osc = this.ctx.createOscillator();
-    const lfo = this.ctx.createOscillator();
-    const lfoGain = this.ctx.createGain();
-    const filter = this.ctx.createBiquadFilter();
-    const gain = this.ctx.createGain();
-
-    const baseF = 165 + clamped * 45;
-    osc.type = 'triangle';
-    osc.frequency.setValueAtTime(baseF * 1.48, now);
-    osc.frequency.exponentialRampToValueAtTime(baseF * 0.88, now + 0.075);
-    osc.frequency.exponentialRampToValueAtTime(baseF * 1.12, now + 0.145);
-    osc.frequency.exponentialRampToValueAtTime(baseF * 0.96, now + 0.21);
-
-    // Subtle elastic wobble vibrato (~15 Hz) decaying with the bounce
+    const lfo = ctx.createOscillator();
     lfo.type = 'sine';
-    lfo.frequency.setValueAtTime(15.5, now);
-    lfoGain.gain.setValueAtTime(22 * clamped, now);
-    lfoGain.gain.exponentialRampToValueAtTime(1.5, now + 0.22);
-    lfo.connect(lfoGain);
-    lfoGain.connect(osc.frequency);
+    lfo.frequency.value = Math.max(2, releaseFreq);
+    const lfoDepth = ctx.createGain();
+    lfoDepth.gain.value = 0.5;
+    lfo.connect(lfoDepth).connect(am.gain);
 
-    filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(520 + clamped * 260, now);
-    filter.Q.setValueAtTime(2.6, now);
-
-    gain.gain.setValueAtTime(0.001, now);
-    gain.gain.linearRampToValueAtTime(vol, now + 0.010);
-    gain.gain.exponentialRampToValueAtTime(vol * 0.42, now + 0.095);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.23);
-
-    osc.connect(filter);
-    filter.connect(gain);
-    gain.connect(this.ctx.destination);
-
-    osc.start(now);
-    lfo.start(now);
-    osc.stop(now + 0.25);
-    lfo.stop(now + 0.25);
+    osc.connect(env).connect(am).connect(this.master);
+    osc.start(t);
+    osc.stop(t + 0.45);
+    lfo.start(t);
+    lfo.stop(t + 0.45);
   }
 }
