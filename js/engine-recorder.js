@@ -1,5 +1,5 @@
 /**
- * EngineRecorder v22 — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS)
+ * EngineRecorder v23 — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS)
  * & Adaptive 256-Color Web Worker GIF (Default 15 FPS, Optional up to 60 FPS)
  *
  * - Video (Primary): WebCodecs VideoEncoder + MiniWebmMuxer with exact 0.1ms engine timestamps
@@ -10,8 +10,8 @@
  * - Returns a ready-to-preview `File` object for the Recording Preview Modal & OS Share Sheet!
  */
 
-import { MiniWebmMuxer } from './webm-muxer.js?v=21';
-import { MiniGifEncoder } from './gif-encoder.js?v=21';
+import { MiniWebmMuxer } from './webm-muxer.js?v=23';
+import { MiniGifEncoder } from './gif-encoder.js?v=23';
 
 function makeEven(n, minVal = 64) {
   const v = Math.max(minVal, Math.round(n));
@@ -314,7 +314,7 @@ export class EngineRecorder {
     return new Promise((resolve, reject) => {
       let worker;
       try {
-        worker = new Worker(new URL('./gif-worker.js?v=21', import.meta.url));
+        worker = new Worker(new URL('./gif-worker.js?v=23', import.meta.url));
       } catch (err) {
         reject(err);
         return;

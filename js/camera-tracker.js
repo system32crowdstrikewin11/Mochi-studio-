@@ -1,5 +1,5 @@
 /**
- * CameraHandTracker v22 — Ultra-Smooth, Granular Dual-Engine Hand Tracking + Air Cursor
+ * CameraHandTracker v23 — Ultra-Smooth Dual-Engine Hand Tracking + Precision Air Cursor
  *
  * Engine 1 (AI Hands — Default, lazy-loaded):
  *   - MediaPipe 21-Landmark HandLandmarker (GPU w/ CPU fallback, up to 2 hands)
@@ -8,13 +8,15 @@
  *   - Continuous 360° open-hand wave bounce
  *
  * Engine 2 (Fast Flow — 0ms instant startup & 100% offline):
+ *   - Automatic Face-Exclusion Halo (integral-image oval detector + native FaceDetector
+ *     fusion, excluding the union of prev & curr face halos so head nods/turns = 0 motion!)
+ *   - Global Camera-Shake Rejection (rejects uniform whole-frame motion when phone moves)
+ *   - Skin-Rich Compact Hand-Cluster Filter (ignores fans, curtains, chairs & scattered noise)
  *   - 3-Level Illumination-Invariant Sub-Pixel Pyramid Lucas-Kanade (24x18 -> 48x36 -> 96x72)
- *   - Precomputed spatial gradients (Ix, Iy), global auto-exposure shift cancellation,
- *     Shi-Tomasi min-eigenvalue gating, and Huber-reweighted median consensus
- *   - Tracks micro-bobs (0.03 px/frame) up to blistering fast flicks (±22 px/frame)!
- *   - Persistent Hybrid Hand Tracker (Optical Flow prediction + Adaptive Background/Skin/Motion
- *     Salience + 2-Step Local Gaussian Mean-Shift + 1-Euro filter) powering full site-wide
- *     Air Cursor (Hold-to-Grab & Click) even with zero AI downloads!
+ *     with precomputed gradients, auto-exposure cancellation & Huber-reweighted median consensus
+ *   - Precision Relative Air-Trackpad Cursor: stays 100% rock-steady when still (zero wild
+ *     jumping!) and glides smoothly with trackpad acceleration + 1-Euro smoothing when your
+ *     hand moves, paired with Dwell-Lock Grab/Click!
  */
 
 const MEDIAPIPE_ESM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
@@ -115,7 +117,7 @@ function directionLabel(vx, vy) {
 }
 
 // ============================================================================
-// 3-Level Sub-Pixel Pyramid Lucas-Kanade Helpers (Zero-Allocation Hot Path!)
+// 3-Level Sub-Pixel Pyramid Lucas-Kanade & Face-Exclusion Helpers
 // ============================================================================
 function smoothBox(src, tmp, dst, w, h) {
   for (let y = 0; y < h; y++) {
@@ -155,7 +157,6 @@ function downsample2x(src, dst, sw, sh) {
 }
 
 function computeGradients(img, ixOut, iyOut, w, h) {
-  // Border zeros
   for (let x = 0; x < w; x++) {
     ixOut[x] = 0; iyOut[x] = 0;
     const lastRow = (h - 1) * w + x;
@@ -195,6 +196,13 @@ function medianOf(arr) {
   return copy.length & 1 ? copy[mid] : 0.5 * (copy[mid - 1] + copy[mid]);
 }
 
+function inFaceHalo(cx, cy, face, scale = 1.0) {
+  if (!face) return false;
+  const dx = (cx - face.cx * scale) / Math.max(1, face.rx * scale);
+  const dy = (cy - face.cy * scale) / Math.max(1, face.ry * scale);
+  return (dx * dx + dy * dy) <= 1.0;
+}
+
 export class CameraHandTracker {
   constructor() {
     this.enabled = false;
@@ -206,19 +214,33 @@ export class CameraHandTracker {
     this.airCursorEnabled = true;
     this.allowWaveBounce = true;
     this.followEnabled = false;
-    this.sensitivity = 68;    // 20 .. 100
-    this.smoothness = 55;     // 0 .. 100 (tunes 1-Euro filter live!)
+    this.faceFilterEnabled = true; // Ignore face, head nods, camera shake & non-skin room clutter in Fast Flow!
+    this.sensitivity = 68;         // 20 .. 100
+    this.smoothness = 55;          // 0 .. 100 (tunes 1-Euro filter live!)
 
     // External grab lock notification (e.g. Fast Flow dwell-grab active in AirCursorController)
     this._externalGrabActive = false;
     this._externalReleaseGraceUntil = 0;
 
-    // Engine selection: 'ai' (MediaPipe 21-landmark w/ instant Fast Flow fallback) | 'flow' (Fast Flow only)
+    // Engine selection: 'ai' | 'flow'
     this.preferredEngine = 'ai';
     this.activeEngine = 'flow';
     this.aiStatus = 'idle'; // 'idle' | 'loading' | 'ready' | 'failed'
     this._handLandmarker = null;
     this._aiLoadPromise = null;
+
+    // Optional native hardware FaceDetector (available on Android Chrome / macOS Chrome)
+    this._nativeFaceDetector = null;
+    this._nativeFaceBusy = false;
+    this._nativeFaceLastMs = 0;
+    this._nativeFaceBox = null; // { cx, cy, rx, ry, seenMs } in 96x72 coords
+    if (typeof window !== 'undefined' && typeof window.FaceDetector === 'function') {
+      try {
+        this._nativeFaceDetector = new window.FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      } catch {
+        this._nativeFaceDetector = null;
+      }
+    }
 
     // Camera media
     this.stream = null;
@@ -234,7 +256,7 @@ export class CameraHandTracker {
     this._lastVideoTime = -1;
     this._lastProcessMs = 0;
 
-    // Pre-allocated 3-Level Pyramid Lucas-Kanade & Hand Segmentation Buffers (zero GC!)
+    // Pre-allocated 3-Level Pyramid Lucas-Kanade & Face-Mask Buffers (zero GC!)
     this.procCanvas = document.createElement('canvas');
     this.procCanvas.width = FW;
     this.procCanvas.height = FH;
@@ -247,10 +269,9 @@ export class CameraHandTracker {
     this._currFine = new Float32Array(FW * FH);
     this._ixFine = new Float32Array(FW * FH);
     this._iyFine = new Float32Array(FW * FH);
-    this._skinFine = new Uint8Array(FW * FH);
-    this._bgFine = new Float32Array(FW * FH);
-    this._heatFine = new Float32Array(FW * FH);
-    this._salFine = new Float32Array(FW * FH);
+    this._prevSkin = new Uint8Array(FW * FH);
+    this._currSkin = new Uint8Array(FW * FH);
+    this._skinII = new Int32Array((FW + 1) * (FH + 1));
 
     // Coarse 48x36
     this._rawCoarse = new Float32Array(CW * CH);
@@ -269,23 +290,27 @@ export class CameraHandTracker {
     this._iyTiny = new Float32Array(TW * TH);
 
     this._hasPrevFlow = false;
-    this._hasBg = false;
+
+    // Tracked face exclusion ellipses (prev & curr union prevents head-nod leaks!)
+    this._prevFace = null;
+    this._currFace = null;
+    this._faceLastSeenMs = 0;
 
     // Adaptive 1-Euro filters for Fast Flow
     this._flowVelFilter = new OneEuro2D(2.4, 0.16, 1.2);
-    this._flowCursorFilter = new OneEuro2D(2.2, 0.14, 1.2);
-    this._centroidFilter = new OneEuro2D(1.8, 0.08, 1.0);
+    this._flowCursorFilter = new OneEuro2D(2.6, 0.18, 1.2);
 
-    // Persistent Fast Flow Hand Tracker state
-    this._flowHand = {
-      present: false,
-      rawX: 0.5,       // [0..1] in camera space
-      rawY: 0.5,
-      cursorX: 0.5,    // [0..1] in viewport space (after active-zone + 1-Euro)
-      cursorY: 0.5,
-      lastSeenMs: 0,
-      lastActiveMs: 0,
-      confidence: 0,
+    // Fast Flow Relative Air-Trackpad Cursor state (NEVER teleports to face/background!)
+    this._trackpad = {
+      visible: false,
+      x: 0.5,          // [0..1] viewport coordinate
+      y: 0.5,
+      filteredX: 0.5,
+      filteredY: 0.5,
+      clusterX: 0.5,   // camera-space centroid of last verified hand cluster (for PiP reticle)
+      clusterY: 0.5,
+      lastMoveMs: 0,
+      hasCluster: false,
     };
 
     // Per-hand tracked states (up to 2 hands in AI mode)
@@ -336,7 +361,6 @@ export class CameraHandTracker {
     this._applySmoothness();
   }
 
-  /** Called from main loop so Fast Flow knows when a Dwell-Grab is holding a cheek/slider */
   setExternalGrabActive(active, now = performance.now()) {
     if (this._externalGrabActive && !active) {
       this._externalReleaseGraceUntil = now + 280;
@@ -354,8 +378,7 @@ export class CameraHandTracker {
     const minCut = 4.2 - s * 3.1; // 4.2 Hz -> 1.1 Hz
     const beta = 0.24 - s * 0.17; // 0.24 -> 0.07
     this._flowVelFilter.setParams(minCut * 1.15, beta);
-    this._flowCursorFilter.setParams(minCut * 1.1, beta * 1.25);
-    this._centroidFilter.setParams(minCut, beta * 0.8);
+    this._flowCursorFilter.setParams(minCut * 1.25, beta * 1.4);
     for (const h of this._hands) {
       h.palmFilter.setParams(minCut, beta);
       h.pinchFilter.setParams(minCut * 1.25, beta * 1.3);
@@ -363,19 +386,28 @@ export class CameraHandTracker {
     }
   }
 
+  recenterFlowCursor() {
+    this._trackpad.x = 0.5;
+    this._trackpad.y = 0.5;
+    this._trackpad.filteredX = 0.5;
+    this._trackpad.filteredY = 0.5;
+    this._flowCursorFilter.reset();
+  }
+
   _resetFlowTracker() {
     this._hasPrevFlow = false;
-    this._hasBg = false;
-    this._heatFine.fill(0);
+    this._prevFace = null;
+    this._currFace = null;
+    this._nativeFaceBox = null;
     this._flowVelFilter.reset();
     this._flowCursorFilter.reset();
-    this._centroidFilter.reset();
-    this._flowHand.present = false;
-    this._flowHand.confidence = 0;
-    this._flowHand.rawX = 0.5;
-    this._flowHand.rawY = 0.5;
-    this._flowHand.cursorX = 0.5;
-    this._flowHand.cursorY = 0.5;
+    this._trackpad.visible = false;
+    this._trackpad.x = 0.5;
+    this._trackpad.y = 0.5;
+    this._trackpad.filteredX = 0.5;
+    this._trackpad.filteredY = 0.5;
+    this._trackpad.hasCluster = false;
+    this._trackpad.lastMoveMs = 0;
     this.activeBlocks.length = 0;
     this.handCursors.length = 0;
   }
@@ -391,8 +423,8 @@ export class CameraHandTracker {
         this.onEngineChange(
           'flow',
           this.airCursorEnabled
-            ? 'Fast Flow active! Move hand to aim, hold still briefly to grab/click, or wave to bounce.'
-            : 'Fast Flow optical flow active! Wave in any 360° direction.'
+            ? 'Fast Flow active (Face ignored)! Glide hand like a trackpad & pause to grab/click.'
+            : 'Fast Flow optical flow active (Face ignored)! Wave in any direction.'
         );
       }
     } else if (this._handLandmarker) {
@@ -514,16 +546,10 @@ export class CameraHandTracker {
     if (this.enabled) return { active: true };
 
     if (!window.isSecureContext) {
-      return {
-        active: false,
-        message: 'Camera tracking needs localhost or HTTPS.',
-      };
+      return { active: false, message: 'Camera tracking needs localhost or HTTPS.' };
     }
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
-      return {
-        active: false,
-        message: 'Camera access is not available in this browser.',
-      };
+      return { active: false, message: 'Camera access is not available in this browser.' };
     }
 
     try {
@@ -581,8 +607,8 @@ export class CameraHandTracker {
       return {
         active: true,
         message: this.airCursorEnabled
-          ? 'Fast Flow + Air Cursor ON! Aim & hold still briefly to grab/click, or wave to bounce.'
-          : 'Fast Flow Tracking ON! Wave in any direction to bounce.',
+          ? 'Fast Flow ON (Face ignored)! Glide hand like a trackpad & pause to grab/click.'
+          : 'Fast Flow ON (Face ignored)! Wave hand in any direction to bounce.',
       };
     } catch (err) {
       const denied = err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
@@ -878,329 +904,343 @@ export class CameraHandTracker {
   }
 
   // ==========================================================================
-  // ENGINE 2: 3-Level Illumination-Invariant Sub-Pixel Pyramid Lucas-Kanade
-  //           + Persistent Hybrid Hand Tracker (Flow + Mean-Shift Air Cursor!)
+  // ENGINE 2: Face-Masked, Camera-Shake-Canceled Fast Flow + Precision Trackpad
   // ==========================================================================
-  _lkLevel(prev, curr, ixImg, iyImg, w, h, initU, initV, gridStep, winR, iters, maxDisp, minTdiff, lumaShift, collectBlocks) {
-    const margin = winR + 2;
-    const vecs = [];
-    let centSumX = 0;
-    let centSumY = 0;
-    let centSumW = 0;
+  _pollNativeFaceDetector(now) {
+    if (!this._nativeFaceDetector || this._nativeFaceBusy || now - this._nativeFaceLastMs < 160) return;
+    this._nativeFaceBusy = true;
+    this._nativeFaceLastMs = now;
+    this._nativeFaceDetector.detect(this.procCanvas).then((faces) => {
+      if (faces && faces.length > 0 && faces[0].boundingBox) {
+        const bb = faces[0].boundingBox;
+        this._nativeFaceBox = {
+          cx: bb.x + bb.width * 0.5,
+          cy: bb.y + bb.height * 0.52,
+          rx: Math.max(10, bb.width * 0.78),
+          ry: Math.max(12, bb.height * 0.86),
+          seenMs: performance.now(),
+        };
+      }
+    }).catch(() => {
+      this._nativeFaceDetector = null;
+    }).finally(() => {
+      this._nativeFaceBusy = false;
+    });
+  }
 
-    for (let cy = margin; cy < h - margin; cy += gridStep) {
-      for (let cx = margin; cx < w - margin; cx += gridStep) {
-        let tdiff = 0;
-        let skinHits = 0;
-        for (let dy = -winR; dy <= winR; dy += 2) {
-          const row = (cy + dy) * w;
-          for (let dx = -winR; dx <= winR; dx += 2) {
-            const idx = row + cx + dx;
-            const d = (curr[idx] - lumaShift) - prev[idx];
-            tdiff += d < 0 ? -d : d;
-            if (collectBlocks) skinHits += this._skinFine[idx];
+  /** Fast integral-image skin-oval face detector on 96x72 (fused with native FaceDetector) */
+  _detectFaceHalo(now, skinMask) {
+    if (!this.faceFilterEnabled || this.facingMode !== 'user') {
+      return null;
+    }
+
+    this._pollNativeFaceDetector(now);
+    if (this._nativeFaceBox && now - this._nativeFaceBox.seenMs < 650) {
+      return {
+        cx: this._nativeFaceBox.cx,
+        cy: this._nativeFaceBox.cy,
+        rx: this._nativeFaceBox.rx,
+        ry: this._nativeFaceBox.ry,
+      };
+    }
+
+    // Build 2D summed-area table (integral image) of skinMask
+    const ii = this._skinII;
+    const stride = FW + 1;
+    for (let x = 0; x <= FW; x++) ii[x] = 0;
+    for (let y = 0; y < FH; y++) {
+      let rowSum = 0;
+      const srcRow = y * FW;
+      const prevRow = y * stride;
+      const curRow = (y + 1) * stride;
+      ii[curRow] = 0;
+      for (let x = 0; x < FW; x++) {
+        rowSum += skinMask[srcRow + x];
+        ii[curRow + x + 1] = ii[prevRow + x + 1] + rowSum;
+      }
+    }
+
+    const boxSum = (x0, y0, x1, y1) => {
+      const a = x0 < 0 ? 0 : (x0 > FW ? FW : x0);
+      const b = x1 < 0 ? 0 : (x1 > FW ? FW : x1);
+      const c = y0 < 0 ? 0 : (y0 > FH ? FH : y0);
+      const d = y1 < 0 ? 0 : (y1 > FH ? FH : y1);
+      if (b <= a || d <= c) return 0;
+      return ii[d * stride + b] - ii[c * stride + b] - ii[d * stride + a] + ii[c * stride + a];
+    };
+
+    let bestScore = 0;
+    let best = null;
+    const radii = [8, 12, 16];
+    const yMin = Math.round(FH * 0.12);
+    const yMax = Math.round(FH * 0.64);
+    const xMin = Math.round(FW * 0.22);
+    const xMax = Math.round(FW * 0.78);
+
+    for (let ri = 0; ri < radii.length; ri++) {
+      const rx = radii[ri];
+      const ry = Math.round(rx * 1.25);
+      const area = (2 * rx) * (2 * ry);
+      const outerArea = Math.max(1, (4 * rx) * (4 * ry) - area);
+
+      for (let cy = yMin; cy <= yMax; cy += 3) {
+        for (let cx = xMin; cx <= xMax; cx += 3) {
+          const inner = boxSum(cx - rx, cy - ry, cx + rx, cy + ry);
+          const density = inner / area;
+          if (density < 0.44) continue;
+          const outer = boxSum(cx - rx * 2, cy - ry * 2, cx + rx * 2, cy + ry * 2) - inner;
+          const outerDensity = outer / outerArea;
+          const centerBias = 1.0 - 0.35 * Math.abs(cx / FW - 0.5) * 2.0;
+          const score = (density - outerDensity * 0.62) * Math.sqrt(inner) * centerBias;
+          if (score > bestScore) {
+            bestScore = score;
+            // Generous 1.85x halo covers cheeks, ears, forehead, hair & chin completely!
+            best = {
+              cx,
+              cy: cy + 2,
+              rx: rx * 1.85,
+              ry: ry * 1.90,
+            };
           }
-        }
-        if (tdiff < minTdiff) continue;
-
-        const skinBoost = collectBlocks && skinHits >= 4 ? 1.6 : 1.0;
-        if (collectBlocks) {
-          centSumX += (cx / w) * tdiff * skinBoost;
-          centSumY += (cy / h) * tdiff * skinBoost;
-          centSumW += tdiff * skinBoost;
-        }
-
-        // Fast structure tensor using precomputed gradients (zero extra neighbor reads!)
-        let gxx = 0, gxy = 0, gyy = 0;
-        for (let dy = -winR; dy <= winR; dy += 2) {
-          const row = (cy + dy) * w;
-          for (let dx = -winR; dx <= winR; dx += 2) {
-            const idx = row + cx + dx;
-            const ix = ixImg[idx];
-            const iy = iyImg[idx];
-            gxx += ix * ix;
-            gxy += ix * iy;
-            gyy += iy * iy;
-          }
-        }
-
-        const det = gxx * gyy - gxy * gxy;
-        const trace = gxx + gyy;
-        if (trace < 28.0 || det < 1e-3) continue;
-        const disc = Math.max(0, (gxx - gyy) * (gxx - gyy) + 4 * gxy * gxy);
-        if (0.5 * (trace - Math.sqrt(disc)) < 7.0) continue;
-
-        const invDet = 1.0 / det;
-        let u = initU;
-        let v = initV;
-
-        for (let it = 0; it < iters; it++) {
-          let bx = 0, by = 0;
-          for (let dy = -winR; dy <= winR; dy += 2) {
-            const py = cy + dy;
-            const row = py * w;
-            for (let dx = -winR; dx <= winR; dx += 2) {
-              const px = cx + dx;
-              const idx = row + px;
-              const dtVal = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[idx];
-              bx += ixImg[idx] * dtVal;
-              by += iyImg[idx] * dtVal;
-            }
-          }
-          const du = -(gyy * bx - gxy * by) * invDet;
-          const dv = -(-gxy * bx + gxx * by) * invDet;
-          u += du;
-          v += dv;
-          if (u * u + v * v > maxDisp * maxDisp || du * du + dv * dv < 1e-4) break;
-        }
-
-        const mag = Math.hypot(u, v);
-        if (mag > maxDisp || mag < 0.025) continue;
-
-        let resAfter = 0;
-        for (let dy = -winR; dy <= winR; dy += 2) {
-          const py = cy + dy;
-          const row = py * w;
-          for (let dx = -winR; dx <= winR; dx += 2) {
-            const px = cx + dx;
-            const d = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[row + px];
-            resAfter += d < 0 ? -d : d;
-          }
-        }
-
-        if (resAfter < tdiff * 0.78) {
-          const gain = tdiff - resAfter;
-          vecs.push({ weight: gain * (gain / tdiff) * skinBoost, u, v, cx, cy });
         }
       }
     }
 
-    if (vecs.length < 2) {
-      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
+    if (best && bestScore >= 5.5) {
+      this._faceLastSeenMs = now;
+      if (this._currFace) {
+        // Smooth face halo slightly so it doesn't jitter, while adapting immediately to head turns
+        return {
+          cx: this._currFace.cx * 0.35 + best.cx * 0.65,
+          cy: this._currFace.cy * 0.35 + best.cy * 0.65,
+          rx: Math.max(best.rx, this._currFace.rx * 0.85 + best.rx * 0.15),
+          ry: Math.max(best.ry, this._currFace.ry * 0.85 + best.ry * 0.15),
+        };
+      }
+      return best;
     }
 
-    // Huber-reweighted median consensus — kills shadow/hair outliers cleanly!
-    const us = vecs.map((v) => v.u);
-    const vs = vecs.map((v) => v.v);
+    // Keep previous face halo alive briefly during momentary occlusion (e.g. blinking/shadow)
+    if (this._currFace && now - this._faceLastSeenMs < 700) {
+      return this._currFace;
+    }
+    return null;
+  }
+
+  _solveBlock(prev, curr, ixImg, iyImg, w, h, cx, cy, winR, initU, initV, maxDisp, minTdiff, lumaShift, iters) {
+    let tdiff = 0;
+    for (let dy = -winR; dy <= winR; dy += 2) {
+      const row = (cy + dy) * w;
+      for (let dx = -winR; dx <= winR; dx += 2) {
+        const idx = row + cx + dx;
+        const d = (curr[idx] - lumaShift) - prev[idx];
+        tdiff += d < 0 ? -d : d;
+      }
+    }
+    if (tdiff < minTdiff) return null;
+
+    let gxx = 0, gxy = 0, gyy = 0;
+    for (let dy = -winR; dy <= winR; dy += 2) {
+      const row = (cy + dy) * w;
+      for (let dx = -winR; dx <= winR; dx += 2) {
+        const idx = row + cx + dx;
+        const ix = ixImg[idx];
+        const iy = iyImg[idx];
+        gxx += ix * ix;
+        gxy += ix * iy;
+        gyy += iy * iy;
+      }
+    }
+
+    const det = gxx * gyy - gxy * gxy;
+    const trace = gxx + gyy;
+    if (trace < 28.0 || det < 1e-3) return null;
+    const disc = Math.max(0, (gxx - gyy) * (gxx - gyy) + 4 * gxy * gxy);
+    if (0.5 * (trace - Math.sqrt(disc)) < 7.0) return null;
+
+    const invDet = 1.0 / det;
+    let u = initU;
+    let v = initV;
+
+    for (let it = 0; it < iters; it++) {
+      let bx = 0, by = 0;
+      for (let dy = -winR; dy <= winR; dy += 2) {
+        const py = cy + dy;
+        const row = py * w;
+        for (let dx = -winR; dx <= winR; dx += 2) {
+          const px = cx + dx;
+          const idx = row + px;
+          const dtVal = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[idx];
+          bx += ixImg[idx] * dtVal;
+          by += iyImg[idx] * dtVal;
+        }
+      }
+      const du = -(gyy * bx - gxy * by) * invDet;
+      const dv = -(-gxy * bx + gxx * by) * invDet;
+      u += du;
+      v += dv;
+      if (u * u + v * v > maxDisp * maxDisp || du * du + dv * dv < 1e-4) break;
+    }
+
+    const mag = Math.hypot(u, v);
+    if (mag > maxDisp || mag < 0.03) return null;
+
+    let resAfter = 0;
+    for (let dy = -winR; dy <= winR; dy += 2) {
+      const py = cy + dy;
+      const row = py * w;
+      for (let dx = -winR; dx <= winR; dx += 2) {
+        const px = cx + dx;
+        const d = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[row + px];
+        resAfter += d < 0 ? -d : d;
+      }
+    }
+
+    if (resAfter >= tdiff * 0.78) return null;
+    const gain = tdiff - resAfter;
+    return { u, v, weight: gain * (gain / tdiff) };
+  }
+
+  /** Detect whole-frame camera shake (holding/tilting phone) on coarse 48x36 grid */
+  _isCameraShake(lumaShift) {
+    let total = 0;
+    let moving = 0;
+    let su = 0, sv = 0, smag = 0;
+    for (let cy = 5; cy < CH - 5; cy += 5) {
+      for (let cx = 5; cx < CW - 5; cx += 5) {
+        total++;
+        const r = this._solveBlock(
+          this._prevCoarse, this._currCoarse, this._ixCoarse, this._iyCoarse,
+          CW, CH, cx, cy, 3, 0, 0, 9.0, 16.0, lumaShift, 2
+        );
+        if (r) {
+          moving++;
+          su += r.u;
+          sv += r.v;
+          smag += Math.hypot(r.u, r.v);
+        }
+      }
+    }
+    if (moving > total * 0.44 && smag > 1e-4) {
+      const coh = Math.hypot(su, sv) / smag;
+      if (coh > 0.62) return true;
+    }
+    return false;
+  }
+
+  _lkHandLevel(prev, curr, ixImg, iyImg, w, h, initU, initV, gridStep, winR, iters, maxDisp, minTdiff, lumaShift, scaleToFine, enforceSkin, clusterFine) {
+    const margin = winR + 2;
+    const vecs = [];
+    const face0 = this._prevFace;
+    const face1 = this._currFace;
+    const filterFace = this.faceFilterEnabled && this.facingMode === 'user';
+
+    for (let cy = margin; cy < h - margin; cy += gridStep) {
+      for (let cx = margin; cx < w - margin; cx += gridStep) {
+        // Exclude UNION of prev & curr face halos at every pyramid level!
+        if (filterFace) {
+          const fx = cx * scaleToFine;
+          const fy = cy * scaleToFine;
+          if (inFaceHalo(fx, fy, face0, 1.0) || inFaceHalo(fx, fy, face1, 1.0)) {
+            continue;
+          }
+        }
+
+        // On fine level, strictly require skin pixels when filter is enabled (rejects fans, chairs, curtains!)
+        let skinMul = 1.0;
+        if (enforceSkin && filterFace) {
+          let skinHits = 0;
+          for (let dy = -winR; dy <= winR; dy += 2) {
+            const row = (cy + dy) * w;
+            for (let dx = -winR; dx <= winR; dx += 2) {
+              const idx = row + cx + dx;
+              skinHits += this._prevSkin[idx] + this._currSkin[idx];
+            }
+          }
+          if (skinHits < 6) continue;
+          skinMul = 1.0 + skinHits * 0.05;
+        }
+
+        const r = this._solveBlock(
+          prev, curr, ixImg, iyImg, w, h, cx, cy, winR,
+          initU, initV, maxDisp, minTdiff, lumaShift, iters
+        );
+        if (!r) continue;
+
+        // Also reject blocks whose warped destination lands inside the face halo!
+        if (filterFace) {
+          const destX = (cx + r.u) * scaleToFine;
+          const destY = (cy + r.v) * scaleToFine;
+          if (inFaceHalo(destX, destY, face1, 1.0)) continue;
+        }
+
+        vecs.push({ cx, cy, u: r.u, v: r.v, weight: r.weight * skinMul });
+      }
+    }
+
+    const minBlocks = clusterFine ? 3 : 2;
+    if (vecs.length < minBlocks) {
+      return { u: 0, v: 0, ok: false, clusterX: 0.5, clusterY: 0.5 };
+    }
+
+    // Spatial compactness gate on fine level: pick the densest hand-sized cluster (radius 22px)!
+    // Eliminates scattered background noise & isolated flickers completely!
+    let pool = vecs;
+    if (clusterFine) {
+      let bestCluster = [];
+      let bestW = 0;
+      for (let i = 0; i < vecs.length; i++) {
+        const a = vecs[i];
+        let cw = 0;
+        const cl = [];
+        for (let j = 0; j < vecs.length; j++) {
+          const b = vecs[j];
+          if (Math.hypot(b.cx - a.cx, b.cy - a.cy) <= 22.0) {
+            cl.push(b);
+            cw += b.weight;
+          }
+        }
+        if (cw > bestW) {
+          bestW = cw;
+          bestCluster = cl;
+        }
+      }
+      if (bestCluster.length < 3) {
+        return { u: 0, v: 0, ok: false, clusterX: 0.5, clusterY: 0.5 };
+      }
+      pool = bestCluster;
+    }
+
+    // Huber-reweighted median consensus on the hand cluster
+    const us = pool.map((b) => b.u);
+    const vs = pool.map((b) => b.v);
     const medU = medianOf(us);
     const medV = medianOf(vs);
 
-    let sw = 0, su = 0, sv = 0, smag = 0;
-    for (let i = 0; i < vecs.length; i++) {
-      const c = vecs[i];
+    let sw = 0, su = 0, sv = 0, smag = 0, sx = 0, sy = 0;
+    for (let i = 0; i < pool.length; i++) {
+      const c = pool[i];
       const dist = Math.hypot(c.u - medU, c.v - medV);
       const hw = c.weight / (1.0 + (dist / 1.8) * (dist / 1.8));
       sw += hw;
       su += hw * c.u;
       sv += hw * c.v;
       smag += hw * Math.hypot(c.u, c.v);
-      if (collectBlocks && dist < 3.6) {
+      sx += hw * (c.cx / w);
+      sy += hw * (c.cy / h);
+      if (clusterFine && dist < 3.4) {
         this.activeBlocks.push({ x: c.cx / w, y: c.cy / h, u: c.u, v: c.v });
       }
     }
 
-    if (sw <= 1e-6) {
-      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
-    }
+    if (sw <= 1e-6) return { u: 0, v: 0, ok: false, clusterX: 0.5, clusterY: 0.5 };
     const ux = su / sw;
     const uy = sv / sw;
-    const coherence = Math.hypot(ux, uy) / Math.max(1e-5, smag / sw);
-    if (coherence < 0.46) {
-      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
+    const coh = Math.hypot(ux, uy) / Math.max(1e-5, smag / sw);
+    if (coh < (clusterFine ? 0.54 : 0.46)) {
+      return { u: 0, v: 0, ok: false, clusterX: 0.5, clusterY: 0.5 };
     }
-    return { u: ux, v: uy, vecs, centSumX, centSumY, centSumW };
-  }
-
-  _updateFlowHandCursor(now, dt, fine, lumaShift) {
-    const fh = this._flowHand;
-    const nPx = FW * FH;
-    const curr = this._currFine;
-    const prev = this._prevFine;
-    const bg = this._bgFine;
-    const heat = this._heatFine;
-    const skin = this._skinFine;
-    const sal = this._salFine;
-
-    // 1. Update adaptive background model + per-pixel motion heat + salience map
-    let movedPx = 0;
-    for (let i = 0; i < nPx; i++) {
-      const diffPrev = Math.abs((curr[i] - lumaShift) - prev[i]);
-      if (diffPrev > 9.0) {
-        movedPx++;
-        heat[i] = Math.min(80, heat[i] * 0.72 + diffPrev * 1.45);
-      } else {
-        heat[i] *= 0.86;
-      }
-      // Adapt background ONLY on quiet pixels so a paused hand stays bright in foreground!
-      if (diffPrev < 5.5 && heat[i] < 4.0) {
-        bg[i] = bg[i] * 0.985 + curr[i] * 0.015;
-      }
-      const fgDiff = Math.abs(curr[i] - bg[i]);
-      const fgSignal = fgDiff > 13.0 ? (fgDiff - 13.0) : 0;
-      const skinMul = skin[i] ? 1.85 : 0.75;
-      sal[i] = (fgSignal * 0.85 + heat[i] * 1.35) * skinMul;
-    }
-
-    // If camera itself was bumped/moved (>58% of pixels changed at once), rapidly re-learn background
-    if (movedPx > nPx * 0.58) {
-      for (let i = 0; i < nPx; i++) {
-        bg[i] = bg[i] * 0.5 + curr[i] * 0.5;
-      }
-    }
-
-    // 2. Acquire hand on first coherent motion (or strong foreground-skin peak)
-    const hasFlowMotion = fine.vecs.length >= 2 && (Math.abs(fine.u) > 0.04 || Math.abs(fine.v) > 0.04);
-
-    if (!fh.present) {
-      if (hasFlowMotion) {
-        // Seed directly at the moving hand blocks!
-        let sx = 0, sy = 0, sw = 0;
-        for (let i = 0; i < fine.vecs.length; i++) {
-          const c = fine.vecs[i];
-          sx += (c.cx / FW) * c.weight;
-          sy += (c.cy / FH) * c.weight;
-          sw += c.weight;
-        }
-        if (sw > 0) {
-          fh.rawX = sx / sw;
-          fh.rawY = sy / sw;
-          fh.present = true;
-          fh.lastSeenMs = now;
-          fh.lastActiveMs = now;
-          fh.confidence = 1.0;
-          this._flowCursorFilter.reset();
-        }
-      } else {
-        // Fallback: check for a clear foreground+skin hand held up in the active frame
-        let bestS = 0, bestX = 0.5, bestY = 0.5;
-        for (let gy = 8; gy < FH - 8; gy += 6) {
-          for (let gx = 8; gx < FW - 8; gx += 6) {
-            let local = 0;
-            for (let dy = -4; dy <= 4; dy += 2) {
-              const row = (gy + dy) * FW;
-              for (let dx = -4; dx <= 4; dx += 2) {
-                local += sal[row + gx + dx];
-              }
-            }
-            if (local > bestS) {
-              bestS = local;
-              bestX = gx / FW;
-              bestY = gy / FH;
-            }
-          }
-        }
-        if (bestS > 520) {
-          fh.rawX = bestX;
-          fh.rawY = bestY;
-          fh.present = true;
-          fh.lastSeenMs = now;
-          fh.lastActiveMs = now;
-          fh.confidence = 0.8;
-          this._flowCursorFilter.reset();
-        }
-      }
-    } else {
-      // 3. Hybrid Tracking: Sub-pixel Optical Flow Prediction + 2-Step Local Gaussian Mean-Shift!
-      let predU = 0;
-      let predV = 0;
-      let localFlowW = 0;
-
-      if (hasFlowMotion) {
-        const hxPx = fh.rawX * FW;
-        const hyPx = fh.rawY * FH;
-        const localR = 26;
-        for (let i = 0; i < fine.vecs.length; i++) {
-          const c = fine.vecs[i];
-          const d = Math.hypot(c.cx - hxPx, c.cy - hyPx);
-          if (d < localR) {
-            const w = c.weight * (1.0 - d / localR);
-            predU += c.u * w;
-            predV += c.v * w;
-            localFlowW += w;
-          }
-        }
-        if (localFlowW > 0) {
-          predU /= localFlowW;
-          predV /= localFlowW;
-        } else if (Math.hypot(fine.u, fine.v) > 1.2) {
-          // Fast wave moved outside localR in 1 frame — follow consensus flow!
-          predU = fine.u;
-          predV = fine.v;
-        }
-      }
-
-      // Advance by exact sub-pixel optical flow displacement!
-      fh.rawX = Math.max(0.04, Math.min(0.96, fh.rawX + predU / FW));
-      fh.rawY = Math.max(0.04, Math.min(0.96, fh.rawY + predV / FH));
-
-      // 2-step local Gaussian Mean-Shift on salience map to keep centered & prevent drift!
-      let localEnergy = 0;
-      const winR = 14;
-      const inv2Sig2 = 1.0 / (2.0 * 7.5 * 7.5);
-      for (let iter = 0; iter < 2; iter++) {
-        const cx = Math.round(fh.rawX * FW);
-        const cy = Math.round(fh.rawY * FH);
-        let mx = 0, my = 0, mw = 0;
-        const y0 = Math.max(2, cy - winR);
-        const y1 = Math.min(FH - 3, cy + winR);
-        const x0 = Math.max(2, cx - winR);
-        const x1 = Math.min(FW - 3, cx + winR);
-
-        for (let y = y0; y <= y1; y += 2) {
-          const dy = y - cy;
-          const row = y * FW;
-          for (let x = x0; x <= x1; x += 2) {
-            const sVal = sal[row + x];
-            if (sVal <= 2.0) continue;
-            const dx = x - cx;
-            const gw = sVal * Math.exp(-(dx * dx + dy * dy) * inv2Sig2);
-            mx += x * gw;
-            my += y * gw;
-            mw += gw;
-          }
-        }
-
-        if (iter === 0) localEnergy = mw;
-        if (mw > 45) {
-          const targetX = (mx / mw) / FW;
-          const targetY = (my / mw) / FH;
-          // Gentle snap when moving (flow dominates!), firmer lock when still!
-          const pull = localFlowW > 0 ? 0.20 : 0.28;
-          fh.rawX += (targetX - fh.rawX) * pull;
-          fh.rawY += (targetY - fh.rawY) * pull;
-        }
-      }
-
-      if (localEnergy > 80 || localFlowW > 0) {
-        fh.lastSeenMs = now;
-        if (localFlowW > 0) fh.lastActiveMs = now;
-        fh.confidence = Math.min(1, fh.confidence + 0.15);
-      } else {
-        fh.confidence *= 0.92;
-      }
-
-      // If hand leaves frame completely (no foreground/skin salience for > 1.8s), drop cursor cleanly
-      if (now - fh.lastSeenMs > 1800) {
-        fh.present = false;
-        fh.confidence = 0;
-      }
-    }
-
-    if (fh.present && this.airCursorEnabled) {
-      const mapped = this._mapActiveZone(fh.rawX, fh.rawY);
-      const filtered = this._flowCursorFilter.filter(mapped.x, mapped.y, dt);
-      fh.cursorX = filtered.x;
-      fh.cursorY = filtered.y;
-
-      this.handCursors.push({
-        id: 0,
-        x: fh.cursorX,
-        y: fh.cursorY,
-        mode: 'dwell',
-        pinching: false,
-        pinchProgress: 0,
-      });
-    }
+    return { u: ux, v: uy, ok: true, clusterX: sx / sw, clusterY: sy / sw };
   }
 
   _updateFastFlow(now, dt) {
@@ -1216,7 +1256,7 @@ export class CameraHandTracker {
 
     const rgba = pctx.getImageData(0, 0, FW, FH).data;
     const rawFine = this._rawFine;
-    const skin = this._skinFine;
+    const currSkin = this._currSkin;
     const nPx = FW * FH;
     let sumCurr = 0;
 
@@ -1228,9 +1268,10 @@ export class CameraHandTracker {
       const yVal = (77 * r + 150 * g + 29 * b) * (1 / 256);
       rawFine[i] = yVal;
       sumCurr += yVal;
+      // Inclusive skin-tone detector across light/medium/deep skin tones while rejecting grey/white/cool walls
       const cb = 128 + ((-43 * r - 85 * g + 128 * b) >> 8);
       const cr = 128 + ((128 * r - 107 * g - 21 * b) >> 8);
-      skin[i] = (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) ? 1 : 0;
+      currSkin[i] = (yVal > 38 && r > b + 10 && cb >= 72 && cb <= 128 && cr >= 130 && cr <= 178) ? 1 : 0;
     }
 
     // Build 3-level smoothed Gaussian pyramid (96x72 -> 48x36 -> 24x18)
@@ -1240,20 +1281,21 @@ export class CameraHandTracker {
     downsample2x(this._currCoarse, this._rawTiny, CW, CH);
     smoothBox(this._rawTiny, this._tmpTiny, this._currTiny, TW, TH);
 
-    if (!this._hasBg) {
-      this._bgFine.set(this._currFine);
-      this._hasBg = true;
-    }
+    // Detect current face halo BEFORE overwriting prevFace
+    const nextFace = this._detectFaceHalo(now, currSkin);
+    this._prevFace = this._currFace;
+    this._currFace = nextFace;
 
     if (!this._hasPrevFlow) {
       this._prevFine.set(this._currFine);
       this._prevCoarse.set(this._currCoarse);
       this._prevTiny.set(this._currTiny);
+      this._prevSkin.set(currSkin);
       this._hasPrevFlow = true;
       return false;
     }
 
-    // Global auto-exposure shift cancellation!
+    // Global auto-exposure shift cancellation
     let sumPrev = 0;
     const prevFine = this._prevFine;
     for (let i = 0; i < nPx; i++) sumPrev += prevFine[i];
@@ -1265,36 +1307,97 @@ export class CameraHandTracker {
     computeGradients(this._prevFine, this._ixFine, this._iyFine, FW, FH);
 
     this.activeBlocks.length = 0;
-    const tiny = this._lkLevel(
-      this._prevTiny, this._currTiny, this._ixTiny, this._iyTiny, TW, TH,
-      0, 0, 3, 2, 3, 5.5, 10.0, lumaShift, false
-    );
-    const coarse = this._lkLevel(
-      this._prevCoarse, this._currCoarse, this._ixCoarse, this._iyCoarse, CW, CH,
-      tiny.u * 2.0, tiny.v * 2.0, 5, 3, 3, 11.0, 16.0, lumaShift, false
-    );
-    const fine = this._lkLevel(
-      this._prevFine, this._currFine, this._ixFine, this._iyFine, FW, FH,
-      coarse.u * 2.0, coarse.v * 2.0, 6, 4, 3, 22.0, 24.0, lumaShift, true
-    );
+    let fine = { u: 0, v: 0, ok: false, clusterX: 0.5, clusterY: 0.5 };
 
-    // Update persistent Fast Flow Hand Cursor (before overwriting prevFine!)
-    this._updateFlowHandCursor(now, dt, fine, lumaShift);
+    // 1. Camera-shake gate: if whole phone shifted, reject frame cleanly so cursor stays rock-still!
+    if (!this._isCameraShake(lumaShift)) {
+      const tiny = this._lkHandLevel(
+        this._prevTiny, this._currTiny, this._ixTiny, this._iyTiny, TW, TH,
+        0, 0, 3, 2, 3, 5.5, 10.0, lumaShift, 4, false, false
+      );
+      const coarse = this._lkHandLevel(
+        this._prevCoarse, this._currCoarse, this._ixCoarse, this._iyCoarse, CW, CH,
+        tiny.u * 2.0, tiny.v * 2.0, 5, 3, 3, 11.0, 16.0, lumaShift, 2, false, false
+      );
+      fine = this._lkHandLevel(
+        this._prevFine, this._currFine, this._ixFine, this._iyFine, FW, FH,
+        coarse.u * 2.0, coarse.v * 2.0, 6, 4, 3, 20.0, 22.0, lumaShift, 1, true, true
+      );
+    }
 
     this._prevFine.set(this._currFine);
     this._prevCoarse.set(this._currCoarse);
     this._prevTiny.set(this._currTiny);
+    this._prevSkin.set(currSkin);
 
-    // Convert fine sub-pixel displacement -> normalized screen-widths / second
-    const rawVx = (fine.u / FW) / dt;
-    const rawVy = (fine.v / FH) / dt;
+    // 2. Precision Relative Air-Trackpad Cursor (stays rock-steady at rest — ZERO wild jumping!)
+    const tp = this._trackpad;
+    const sensNorm = this.sensitivity / 100; // 0.20 .. 1.00
+
+    if (this.airCursorEnabled) {
+      if (fine.ok) {
+        tp.hasCluster = true;
+        tp.clusterX = fine.clusterX;
+        tp.clusterY = fine.clusterY;
+
+        const mag = Math.hypot(fine.u, fine.v);
+        // Clean micro-deadzone keeps cursor 100% locked while resting/pausing to dwell-grab!
+        const moveDeadzone = 0.16;
+        if (mag > moveDeadzone) {
+          if (!tp.visible) {
+            tp.visible = true;
+            this._flowCursorFilter.reset();
+          }
+          tp.lastMoveMs = now;
+          const effMag = mag - moveDeadzone;
+          const dirX = fine.u / mag;
+          const dirY = fine.v / mag;
+          // Laptop trackpad acceleration curve: gentle = ultra-precise aim, faster = full-screen glide
+          const gain = (1.05 + sensNorm * 1.15) * (1.0 + Math.min(0.85, effMag * 0.14));
+          const dx = (dirX * effMag / FW) * gain;
+          const dy = (dirY * effMag / FH) * gain;
+          // Clamp single-frame delta so even an extreme glitch can never teleport cursor across screen
+          const maxStep = 0.12;
+          tp.x = Math.max(0.015, Math.min(0.985, tp.x + Math.max(-maxStep, Math.min(maxStep, dx))));
+          tp.y = Math.max(0.015, Math.min(0.985, tp.y + Math.max(-maxStep, Math.min(maxStep, dy))));
+        }
+      } else {
+        tp.hasCluster = false;
+      }
+
+      // Auto-hide cursor if hand has been completely inactive for >4.5s (and not currently grabbing)
+      // Prevents accidental auto-grab when sitting still before raising your hand!
+      if (tp.visible && !this._externalGrabActive && tp.lastMoveMs > 0 && now - tp.lastMoveMs > 4500) {
+        tp.visible = false;
+      }
+
+      if (tp.visible) {
+        const fc = this._flowCursorFilter.filter(tp.x, tp.y, dt);
+        tp.filteredX = fc.x;
+        tp.filteredY = fc.y;
+
+        this.handCursors.push({
+          id: 0,
+          x: tp.filteredX,
+          y: tp.filteredY,
+          mode: 'dwell',
+          pinching: false,
+          pinchProgress: 0,
+        });
+      }
+    } else {
+      tp.visible = false;
+    }
+
+    // 3. Velocity for 360° wave bounce
+    const rawVx = fine.ok ? ((fine.u / FW) / dt) : 0;
+    const rawVy = fine.ok ? ((fine.v / FH) / dt) : 0;
     const fv = this._flowVelFilter.filter(rawVx, rawVy, dt);
     const vx = Math.max(-4.5, Math.min(4.5, fv.x));
     const vy = Math.max(-4.5, Math.min(4.5, fv.y));
     this.smoothVx = vx * 0.55;
     this.smoothVy = vy * 0.55;
 
-    // Mute wave-bounce while a Fast Flow Air Cursor Dwell-Grab is actively pulling a cheek!
     if (!this.allowWaveBounce || this._externalGrabActive || now < this._externalReleaseGraceUntil) {
       this._leadGx *= 0.80;
       this._leadGy *= 0.80;
@@ -1303,35 +1406,20 @@ export class CameraHandTracker {
       return this._externalGrabActive;
     }
 
-    let centX = 0;
-    let centY = 0;
-    let hasCent = 0;
-    if (this._flowHand.present) {
-      centX = this._flowHand.rawX * 2 - 1;
-      centY = this._flowHand.rawY * 2 - 1;
-      hasCent = 1;
-    } else if (fine.centSumW > 380) {
-      const fc = this._centroidFilter.filter(
-        Math.max(-1, Math.min(1, (fine.centSumX / fine.centSumW) * 2 - 1)),
-        Math.max(-1, Math.min(1, (fine.centSumY / fine.centSumW) * 2 - 1)),
-        dt
-      );
-      centX = fc.x;
-      centY = fc.y;
-      hasCent = 1;
-    }
+    const centX = tp.filteredX * 2 - 1;
+    const centY = tp.filteredY * 2 - 1;
+    const hasCent = tp.visible ? 1 : 0;
 
-    return this._applyContinuousWavePhysics(vx, vy, dt, now, this.sensitivity / 100, false, hasCent, centX, centY, false);
+    return this._applyContinuousWavePhysics(vx, vy, dt, now, sensNorm, false, hasCent, centX, centY, false);
   }
 
   // ==========================================================================
   // Unified Silky-Smooth Continuous 360° Wave Coupling (No Steppy Cooldowns!)
   // ==========================================================================
   _applyContinuousWavePhysics(vx, vy, dt, now, sensNorm, isAI, presentCount, centSumX, centSumY, anyPinching) {
-    // Higher wave deadzone when Air Cursor is active so calm aiming stays rock steady, while brisk waves still bounce!
     const deadzone = this.airCursorEnabled
-      ? (isAI ? (0.42 - sensNorm * 0.14) : (0.46 - sensNorm * 0.16))
-      : (isAI ? (0.10 - sensNorm * 0.05) : (0.11 - sensNorm * 0.05));
+      ? (isAI ? (0.42 - sensNorm * 0.14) : (0.58 - sensNorm * 0.16))
+      : (isAI ? (0.10 - sensNorm * 0.05) : (0.12 - sensNorm * 0.05));
     const speed = Math.hypot(vx, vy);
     let active = anyPinching;
 
@@ -1450,11 +1538,29 @@ export class CameraHandTracker {
         ctx.restore();
       }
     } else {
-      // Fast Flow: draw sub-pixel directional flow needles + persistent hand reticle!
+      // Draw subtle dashed Face-Ignored Exclusion Oval so user can see face is safely masked out!
+      if (this._currFace && this.faceFilterEnabled && this.facingMode === 'user') {
+        const fx = (this._currFace.cx / FW) * w;
+        const fy = (this._currFace.cy / FH) * h;
+        const frx = (this._currFace.rx / FW) * w;
+        const fry = (this._currFace.ry / FH) * h;
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.42)';
+        ctx.fillStyle = 'rgba(24, 18, 30, 0.22)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.ellipse(fx, fy, frx, fry, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Draw verified hand-cluster directional flow needles
       if (this.activeBlocks.length > 0) {
         ctx.save();
-        ctx.strokeStyle = 'rgba(255, 150, 185, 0.78)';
-        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = 'rgba(255, 132, 174, 0.90)';
+        ctx.lineWidth = 1.6;
         ctx.lineCap = 'round';
         ctx.beginPath();
         for (let i = 0; i < this.activeBlocks.length; i++) {
@@ -1468,22 +1574,18 @@ export class CameraHandTracker {
         ctx.restore();
       }
 
-      if (this._flowHand.present) {
-        const hx = this._flowHand.rawX * w;
-        const hy = this._flowHand.rawY * h;
+      // Draw active hand cluster highlight ring when hand is moving
+      if (this._trackpad.hasCluster) {
+        const hx = this._trackpad.clusterX * w;
+        const hy = this._trackpad.clusterY * h;
         ctx.save();
         ctx.beginPath();
-        ctx.arc(hx, hy, this._externalGrabActive ? 11 : 9, 0, Math.PI * 2);
-        ctx.fillStyle = this._externalGrabActive ? 'rgba(255, 79, 134, 0.42)' : 'rgba(255, 143, 171, 0.22)';
+        ctx.arc(hx, hy, this._externalGrabActive ? 11 : 8.5, 0, Math.PI * 2);
+        ctx.fillStyle = this._externalGrabActive ? 'rgba(255, 79, 134, 0.42)' : 'rgba(255, 143, 171, 0.24)';
         ctx.fill();
-        ctx.lineWidth = 1.8;
+        ctx.lineWidth = 1.7;
         ctx.strokeStyle = this._externalGrabActive ? '#ff4f86' : '#ffffff';
         ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(hx, hy, 2.3, 0, Math.PI * 2);
-        ctx.fillStyle = '#ffffff';
-        ctx.fill();
         ctx.restore();
       }
     }

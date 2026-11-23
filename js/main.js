@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v22 — Main Application Controller
+ * Mochi Studio v23 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
  * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
@@ -13,15 +13,15 @@ import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js?v=22';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=22';
-import { BrushEngine } from './brush-engine.js?v=22';
-import { MotionSensorManager } from './motion-sensors.js?v=22';
-import { CameraHandTracker } from './camera-tracker.js?v=22';
-import { AirCursorController } from './air-cursor.js?v=22';
-import { SquishAudio } from './audio-squish.js?v=22';
-import { EngineRecorder } from './engine-recorder.js?v=22';
-import { getSample } from './samples.js?v=22';
+} from './physics-continuum.js?v=23';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=23';
+import { BrushEngine } from './brush-engine.js?v=23';
+import { MotionSensorManager } from './motion-sensors.js?v=23';
+import { CameraHandTracker } from './camera-tracker.js?v=23';
+import { AirCursorController } from './air-cursor.js?v=23';
+import { SquishAudio } from './audio-squish.js?v=23';
+import { EngineRecorder } from './engine-recorder.js?v=23';
+import { getSample } from './samples.js?v=23';
 
 const $ = (id) => document.getElementById(id);
 const IMAGE_MAX_SIDE = 2048;
@@ -1029,6 +1029,7 @@ function updateCameraUI() {
   $('optCamera').checked = on;
   $('optCamPreview').checked = camera.showPreview;
   $('optCamMirror').checked = camera.mirror;
+  $('optCamFaceFilter').checked = camera.faceFilterEnabled;
   $('optCamCursor').checked = camera.airCursorEnabled;
   $('btnCamCursor').classList.toggle('active', camera.airCursorEnabled);
   $('camEngineAI').classList.toggle('active', camera.preferredEngine === 'ai');
@@ -1329,6 +1330,10 @@ function wireUI() {
   $('optCamPreview').addEventListener('change', (e) => {
     camera.showPreview = e.target.checked;
     updateCameraUI();
+  });
+  $('optCamFaceFilter').addEventListener('change', (e) => {
+    camera.faceFilterEnabled = e.target.checked;
+    showToast(camera.faceFilterEnabled ? 'Fast Flow now ignores face & room clutter' : 'Fast Flow now tracks any moving object', 2200);
   });
   $('optCamMirror').addEventListener('change', (e) => {
     camera.mirror = e.target.checked;
