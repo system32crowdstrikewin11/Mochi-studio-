@@ -1,5 +1,5 @@
 /**
- * Mochi Studio v21 — Main Application Controller
+ * Mochi Studio v22 — Main Application Controller
  * - Exact 1:1 Original GPU Analytic Quintic-Falloff Mochi Physics (128..192 mesh, 240Hz spring)
  * - Exact 1:1 Original Aspect-Matched Brush Tool (Sharp/Soft, Streamline 0.35, 1:1 Cursor & GPU Mask View)
  * - Exact 1:1 Original 2-Finger Zoom + Pan + Rotation + Auto-Hiding Reset View
@@ -13,15 +13,15 @@ import {
   MochiPhysicsContinuum,
   zetaFromWobble,
   wobbleFromZeta,
-} from './physics-continuum.js?v=21';
-import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=21';
-import { BrushEngine } from './brush-engine.js?v=21';
-import { MotionSensorManager } from './motion-sensors.js?v=21';
-import { CameraHandTracker } from './camera-tracker.js?v=21';
-import { AirCursorController } from './air-cursor.js?v=21';
-import { SquishAudio } from './audio-squish.js?v=21';
-import { EngineRecorder } from './engine-recorder.js?v=21';
-import { getSample } from './samples.js?v=21';
+} from './physics-continuum.js?v=22';
+import { MochiRendererWebGL2 } from './renderer-webgl2.js?v=22';
+import { BrushEngine } from './brush-engine.js?v=22';
+import { MotionSensorManager } from './motion-sensors.js?v=22';
+import { CameraHandTracker } from './camera-tracker.js?v=22';
+import { AirCursorController } from './air-cursor.js?v=22';
+import { SquishAudio } from './audio-squish.js?v=22';
+import { EngineRecorder } from './engine-recorder.js?v=22';
+import { getSample } from './samples.js?v=22';
 
 const $ = (id) => document.getElementById(id);
 const IMAGE_MAX_SIDE = 2048;
@@ -69,6 +69,10 @@ const recorder = new EngineRecorder();
 const airCursor = new AirCursorController($('airCursorCanvas'), {
   getStep: () => state.step,
   glCanvas,
+  canPlayGrabAt: (clientX, clientY) => {
+    const iso = renderer.isoFromClient(clientX, clientY);
+    return physics.canGrabAt(iso.x, iso.y);
+  },
   onPlayGrabStart: (slot, clientX, clientY) => {
     const iso = renderer.isoFromClient(clientX, clientY);
     const g = physics.tryGrab(9000 + slot, iso.x, iso.y);
@@ -605,14 +609,19 @@ function tick(now) {
   if (camera.enabled && !camera.paused) {
     const previewCanvas = camera.showPreview ? $('camPreviewCanvas') : null;
     camera.update(now, previewCanvas);
-    const badgeText = (now - camera.lastGestureTime < 900 && camera.lastGestureTime > 0)
-      ? camera.lastGestureText
-      : (camera.airCursorEnabled && camera.activeEngine === 'ai' ? 'Pinch / Wave' : 'Wave hand');
+    airCursor.update(now, camera.handCursors);
+    camera.setExternalGrabActive(airCursor.isAnyHandBusy(), now);
+    const dwellBadge = airCursor.getStatusBadge();
+    const defaultHint = camera.airCursorEnabled
+      ? (camera.activeEngine === 'ai' ? 'Pinch / Wave' : 'Hold / Wave')
+      : 'Wave hand';
+    const badgeText = dwellBadge
+      || ((now - camera.lastGestureTime < 900 && camera.lastGestureTime > 0) ? camera.lastGestureText : defaultHint);
     const badgeEl = $('camDirBadge');
     if (badgeEl.textContent !== badgeText) badgeEl.textContent = badgeText;
-    airCursor.update(now, camera.handCursors);
   } else {
     airCursor.resetAll();
+    camera.setExternalGrabActive(false, now);
   }
 
   // Upload mask texture whenever dirty (unblurred in Paint mode, blurred in Play mode)
@@ -1012,7 +1021,7 @@ function updateMotionHud() {
 function updateCameraUI() {
   const on = camera.enabled;
   const showPip = on && camera.showPreview && (camera.airCursorEnabled || state.step === 'play');
-  airCursor.enabled = on && camera.airCursorEnabled && camera.activeEngine === 'ai';
+  airCursor.enabled = on && camera.airCursorEnabled;
   if (!airCursor.enabled) airCursor.resetAll();
 
   $('btnCamera').classList.toggle('active', on);
@@ -1294,12 +1303,17 @@ function wireUI() {
   });
   const setAirCursorEnabled = (on) => {
     camera.airCursorEnabled = Boolean(on);
-    if (camera.airCursorEnabled && camera.preferredEngine !== 'ai') {
-      camera.setPreferredEngine('ai');
-    }
     camera.paused = !(camera.airCursorEnabled || state.step === 'play');
     updateCameraUI();
-    showToast(camera.airCursorEnabled ? 'Air Cursor ON — pinch to click, drag sliders, or pull cheeks!' : 'Air Cursor OFF (wave bounce only)', 2400);
+    const isFlow = camera.activeEngine === 'flow';
+    showToast(
+      camera.airCursorEnabled
+        ? (isFlow
+          ? 'Air Cursor ON (Fast Flow) — hold still briefly to grab/click, hold again to release!'
+          : 'Air Cursor ON — pinch to click, drag sliders, or pull cheeks!')
+        : 'Air Cursor OFF (wave bounce only)',
+      2800
+    );
   };
   $('optCamCursor').addEventListener('change', (e) => setAirCursorEnabled(e.target.checked));
   $('btnCamCursor').addEventListener('click', () => setAirCursorEnabled(!camera.airCursorEnabled));

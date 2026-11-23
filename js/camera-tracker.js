@@ -1,25 +1,26 @@
 /**
- * CameraHandTracker v21 — Ultra-Smooth, Granular Dual-Engine Real-Time Hand Tracking
+ * CameraHandTracker v22 — Ultra-Smooth, Granular Dual-Engine Hand Tracking + Air Cursor
  *
- * Engine 1 (AI Hands — Default, auto-loads lazily when Camera turns on):
- *   - MediaPipe 21-Landmark HandLandmarker (@mediapipe/tasks-vision, GPU w/ CPU fallback)
- *   - Tracks up to 2 hands in real time, 100% immune to head/background/lighting noise
- *   - Adaptive 1-Euro Filter gives zero micro-jitter when steady & zero lag on fast waves
- *   - Continuous 360° velocity-to-spring coupling (micro-bobs to full directional bounces!)
- *   - Optional Mid-Air Pinch Grab (thumb + index pinch grabs & pulls mochi cheeks hands-free!)
+ * Engine 1 (AI Hands — Default, lazy-loaded):
+ *   - MediaPipe 21-Landmark HandLandmarker (GPU w/ CPU fallback, up to 2 hands)
+ *   - Ergonomic active-zone mapping + anti-drift pinch stabilization + 1-Euro filter
+ *   - Air Cursor (Pinch & Hold to pull cheeks / paint / scrub sliders; Quick Pinch to click)
+ *   - Continuous 360° open-hand wave bounce
  *
- * Engine 2 (Sub-Pixel Pyramid Lucas-Kanade Optical Flow — 0ms instant startup & offline):
- *   - 2-level Gaussian pyramid (48x36 coarse -> 96x72 fine) with iterative bilinear warping
- *   - Resolves continuous floating-point sub-pixel motion down to 0.03 px/frame (zero stair-stepping!)
- *   - Shi-Tomasi minimum-eigenvalue & motion-coherence gating rejects static walls & noise
- *   - Synced to native camera cadence via requestVideoFrameCallback
+ * Engine 2 (Fast Flow — 0ms instant startup & 100% offline):
+ *   - 3-Level Illumination-Invariant Sub-Pixel Pyramid Lucas-Kanade (24x18 -> 48x36 -> 96x72)
+ *   - Precomputed spatial gradients (Ix, Iy), global auto-exposure shift cancellation,
+ *     Shi-Tomasi min-eigenvalue gating, and Huber-reweighted median consensus
+ *   - Tracks micro-bobs (0.03 px/frame) up to blistering fast flicks (±22 px/frame)!
+ *   - Persistent Hybrid Hand Tracker (Optical Flow prediction + Adaptive Background/Skin/Motion
+ *     Salience + 2-Step Local Gaussian Mean-Shift + 1-Euro filter) powering full site-wide
+ *     Air Cursor (Hold-to-Grab & Click) even with zero AI downloads!
  */
 
 const MEDIAPIPE_ESM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 const MEDIAPIPE_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const MEDIAPIPE_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
 
-// 21-landmark hand bone connections for crisp PiP skeleton overlay
 const HAND_CONNECTIONS = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -29,11 +30,13 @@ const HAND_CONNECTIONS = [
   [0, 17],
 ];
 
-// Sub-pixel Pyramid Lucas-Kanade dimensions
+// 3-Level Sub-Pixel Pyramid dimensions (Fine -> Coarse -> Tiny)
 const FW = 96;
 const FH = 72;
 const CW = 48;
 const CH = 36;
+const TW = 24;
+const TH = 18;
 
 // ============================================================================
 // Adaptive 1-Euro Low-Pass Filter (Zero jitter when still, zero lag when fast!)
@@ -112,10 +115,9 @@ function directionLabel(vx, vy) {
 }
 
 // ============================================================================
-// Sub-Pixel 2-Level Pyramid Lucas-Kanade Helpers (Zero-allocation hot path!)
+// 3-Level Sub-Pixel Pyramid Lucas-Kanade Helpers (Zero-Allocation Hot Path!)
 // ============================================================================
 function smoothBox(src, tmp, dst, w, h) {
-  // Horizontal [1, 2, 1] / 4
   for (let y = 0; y < h; y++) {
     const row = y * w;
     tmp[row] = src[row];
@@ -124,7 +126,6 @@ function smoothBox(src, tmp, dst, w, h) {
     }
     tmp[row + w - 1] = src[row + w - 1];
   }
-  // Vertical [1, 2, 1] / 4
   for (let x = 0; x < w; x++) {
     dst[x] = tmp[x];
     dst[(h - 1) * w + x] = tmp[(h - 1) * w + x];
@@ -153,6 +154,26 @@ function downsample2x(src, dst, sw, sh) {
   }
 }
 
+function computeGradients(img, ixOut, iyOut, w, h) {
+  // Border zeros
+  for (let x = 0; x < w; x++) {
+    ixOut[x] = 0; iyOut[x] = 0;
+    const lastRow = (h - 1) * w + x;
+    ixOut[lastRow] = 0; iyOut[lastRow] = 0;
+  }
+  for (let y = 1; y < h - 1; y++) {
+    const r0 = (y - 1) * w;
+    const r1 = y * w;
+    const r2 = (y + 1) * w;
+    ixOut[r1] = 0; iyOut[r1] = 0;
+    ixOut[r1 + w - 1] = 0; iyOut[r1 + w - 1] = 0;
+    for (let x = 1; x < w - 1; x++) {
+      ixOut[r1 + x] = 0.5 * (img[r1 + x + 1] - img[r1 + x - 1]);
+      iyOut[r1 + x] = 0.5 * (img[r2 + x] - img[r0 + x]);
+    }
+  }
+}
+
 function sampleBilinear(img, w, h, x, y) {
   const cx = x < 0 ? 0 : (x > w - 1.001 ? w - 1.001 : x);
   const cy = y < 0 ? 0 : (y > h - 1.001 ? h - 1.001 : y);
@@ -166,6 +187,12 @@ function sampleBilinear(img, w, h, x, y) {
   const v01 = img[idx + w];
   const v11 = img[idx + w + 1];
   return (v00 + (v10 - v00) * fx) * (1 - fy) + (v01 + (v11 - v01) * fx) * fy;
+}
+
+function medianOf(arr) {
+  const copy = arr.slice().sort((a, b) => a - b);
+  const mid = copy.length >> 1;
+  return copy.length & 1 ? copy[mid] : 0.5 * (copy[mid - 1] + copy[mid]);
 }
 
 export class CameraHandTracker {
@@ -182,10 +209,14 @@ export class CameraHandTracker {
     this.sensitivity = 68;    // 20 .. 100
     this.smoothness = 55;     // 0 .. 100 (tunes 1-Euro filter live!)
 
-    // Engine selection: 'ai' (MediaPipe 21-landmark w/ instant Sub-px LK fallback) | 'flow' (Sub-px LK only)
+    // External grab lock notification (e.g. Fast Flow dwell-grab active in AirCursorController)
+    this._externalGrabActive = false;
+    this._externalReleaseGraceUntil = 0;
+
+    // Engine selection: 'ai' (MediaPipe 21-landmark w/ instant Fast Flow fallback) | 'flow' (Fast Flow only)
     this.preferredEngine = 'ai';
-    this.activeEngine = 'flow'; // 'ai' | 'flow'
-    this.aiStatus = 'idle';     // 'idle' | 'loading' | 'ready' | 'failed'
+    this.activeEngine = 'flow';
+    this.aiStatus = 'idle'; // 'idle' | 'loading' | 'ready' | 'failed'
     this._handLandmarker = null;
     this._aiLoadPromise = null;
 
@@ -203,27 +234,59 @@ export class CameraHandTracker {
     this._lastVideoTime = -1;
     this._lastProcessMs = 0;
 
-    // Pre-allocated Sub-Pixel Pyramid Lucas-Kanade buffers (zero GC per frame!)
+    // Pre-allocated 3-Level Pyramid Lucas-Kanade & Hand Segmentation Buffers (zero GC!)
     this.procCanvas = document.createElement('canvas');
     this.procCanvas.width = FW;
     this.procCanvas.height = FH;
     this.procCtx = this.procCanvas.getContext('2d', { willReadFrequently: true });
 
+    // Fine 96x72
     this._rawFine = new Float32Array(FW * FH);
     this._tmpFine = new Float32Array(FW * FH);
     this._prevFine = new Float32Array(FW * FH);
     this._currFine = new Float32Array(FW * FH);
+    this._ixFine = new Float32Array(FW * FH);
+    this._iyFine = new Float32Array(FW * FH);
     this._skinFine = new Uint8Array(FW * FH);
+    this._bgFine = new Float32Array(FW * FH);
+    this._heatFine = new Float32Array(FW * FH);
+    this._salFine = new Float32Array(FW * FH);
 
+    // Coarse 48x36
     this._rawCoarse = new Float32Array(CW * CH);
     this._tmpCoarse = new Float32Array(CW * CH);
     this._prevCoarse = new Float32Array(CW * CH);
     this._currCoarse = new Float32Array(CW * CH);
-    this._hasPrevFlow = false;
+    this._ixCoarse = new Float32Array(CW * CH);
+    this._iyCoarse = new Float32Array(CW * CH);
 
-    // Adaptive 1-Euro filters
-    this._flowVelFilter = new OneEuro2D(2.2, 0.14, 1.2);
+    // Tiny 24x18
+    this._rawTiny = new Float32Array(TW * TH);
+    this._tmpTiny = new Float32Array(TW * TH);
+    this._prevTiny = new Float32Array(TW * TH);
+    this._currTiny = new Float32Array(TW * TH);
+    this._ixTiny = new Float32Array(TW * TH);
+    this._iyTiny = new Float32Array(TW * TH);
+
+    this._hasPrevFlow = false;
+    this._hasBg = false;
+
+    // Adaptive 1-Euro filters for Fast Flow
+    this._flowVelFilter = new OneEuro2D(2.4, 0.16, 1.2);
+    this._flowCursorFilter = new OneEuro2D(2.2, 0.14, 1.2);
     this._centroidFilter = new OneEuro2D(1.8, 0.08, 1.0);
+
+    // Persistent Fast Flow Hand Tracker state
+    this._flowHand = {
+      present: false,
+      rawX: 0.5,       // [0..1] in camera space
+      rawY: 0.5,
+      cursorX: 0.5,    // [0..1] in viewport space (after active-zone + 1-Euro)
+      cursorY: 0.5,
+      lastSeenMs: 0,
+      lastActiveMs: 0,
+      confidence: 0,
+    };
 
     // Per-hand tracked states (up to 2 hands in AI mode)
     this._hands = [0, 1].map((slot) => ({
@@ -250,12 +313,10 @@ export class CameraHandTracker {
     // Visualization & output state
     this.smoothVx = 0;
     this.smoothVy = 0;
-    this.centroidX = 0;
-    this.centroidY = 0;
-    this.activeBlocks = [];
-    this.handCursors = []; // [{ id, x, y, pinching }] normalized [0..1] for stage overlay
+    this.activeBlocks = []; // [{ x, y, u, v }] for PiP flow needle rendering
+    this.handCursors = [];  // [{ id, x, y, mode, pinching, pinchProgress }]
 
-    // Continuous forces consumed at full display/physics FPS (zero stair-stepping!)
+    // Continuous forces consumed at full display/physics FPS
     this._leadGx = 0;
     this._leadGy = 0;
     this._followGx = 0;
@@ -270,11 +331,17 @@ export class CameraHandTracker {
     // Callbacks
     this.onGestureBounce = null; // (intensity, label) => void
     this.onEngineChange = null;  // (engine, statusMsg) => void
-    this.onPinchStart = null;    // (handId, normX, normY) => void
-    this.onPinchMove = null;     // (handId, normX, normY) => void
     this.onPinchEnd = null;      // (handId) => void
 
     this._applySmoothness();
+  }
+
+  /** Called from main loop so Fast Flow knows when a Dwell-Grab is holding a cheek/slider */
+  setExternalGrabActive(active, now = performance.now()) {
+    if (this._externalGrabActive && !active) {
+      this._externalReleaseGraceUntil = now + 280;
+    }
+    this._externalGrabActive = Boolean(active);
   }
 
   setSmoothness(val) {
@@ -283,11 +350,11 @@ export class CameraHandTracker {
   }
 
   _applySmoothness() {
-    // smoothness 0 = ultra-snappy raw response, 100 = ultra-silky velvet smoothing
     const s = this.smoothness / 100;
-    const minCut = 4.2 - s * 3.1;   // 4.2 Hz -> 1.1 Hz
-    const beta = 0.24 - s * 0.17;   // 0.24 -> 0.07
-    this._flowVelFilter.setParams(minCut * 1.1, beta);
+    const minCut = 4.2 - s * 3.1; // 4.2 Hz -> 1.1 Hz
+    const beta = 0.24 - s * 0.17; // 0.24 -> 0.07
+    this._flowVelFilter.setParams(minCut * 1.15, beta);
+    this._flowCursorFilter.setParams(minCut * 1.1, beta * 1.25);
     this._centroidFilter.setParams(minCut, beta * 0.8);
     for (const h of this._hands) {
       h.palmFilter.setParams(minCut, beta);
@@ -296,14 +363,38 @@ export class CameraHandTracker {
     }
   }
 
+  _resetFlowTracker() {
+    this._hasPrevFlow = false;
+    this._hasBg = false;
+    this._heatFine.fill(0);
+    this._flowVelFilter.reset();
+    this._flowCursorFilter.reset();
+    this._centroidFilter.reset();
+    this._flowHand.present = false;
+    this._flowHand.confidence = 0;
+    this._flowHand.rawX = 0.5;
+    this._flowHand.rawY = 0.5;
+    this._flowHand.cursorX = 0.5;
+    this._flowHand.cursorY = 0.5;
+    this.activeBlocks.length = 0;
+    this.handCursors.length = 0;
+  }
+
   setPreferredEngine(mode) {
     this.preferredEngine = mode === 'flow' ? 'flow' : 'ai';
     if (!this.enabled) return;
     if (this.preferredEngine === 'flow') {
       this._releaseAllPinches();
       this.activeEngine = 'flow';
-      this._hasPrevFlow = false;
-      if (this.onEngineChange) this.onEngineChange('flow', 'Switched to Sub-Pixel Optical Flow');
+      this._resetFlowTracker();
+      if (this.onEngineChange) {
+        this.onEngineChange(
+          'flow',
+          this.airCursorEnabled
+            ? 'Fast Flow active! Move hand to aim, hold still briefly to grab/click, or wave to bounce.'
+            : 'Fast Flow optical flow active! Wave in any 360° direction.'
+        );
+      }
     } else if (this._handLandmarker) {
       this.activeEngine = 'ai';
       this._resetHandStates();
@@ -338,7 +429,6 @@ export class CameraHandTracker {
         const mp = await import(/* @vite-ignore */ MEDIAPIPE_ESM);
         const vision = await mp.FilesetResolver.forVisionTasks(MEDIAPIPE_WASM);
         let landmarker = null;
-        // Prefer GPU delegate for 60fps mobile speed; gracefully fall back to CPU delegate if GPU busy
         for (const delegate of ['GPU', 'CPU']) {
           try {
             landmarker = await mp.HandLandmarker.createFromOptions(vision, {
@@ -362,7 +452,7 @@ export class CameraHandTracker {
           this.activeEngine = 'ai';
           this._resetHandStates();
           if (this.onEngineChange) {
-            this.onEngineChange('ai', 'AI 21-Point Hand Tracking ready! Wave or pinch in mid-air.');
+            this.onEngineChange('ai', 'AI 21-Point Hand Tracking ready! Pinch to pull/click or wave to bounce.');
           }
         }
         return true;
@@ -370,7 +460,7 @@ export class CameraHandTracker {
         this.aiStatus = 'failed';
         this.activeEngine = 'flow';
         if (this.onEngineChange) {
-          this.onEngineChange('flow', null);
+          this.onEngineChange('flow', 'Using Fast Flow offline tracking + Air Cursor!');
         }
         return false;
       } finally {
@@ -403,8 +493,8 @@ export class CameraHandTracker {
     for (const h of this._hands) {
       if (h.pinching) {
         h.pinching = false;
-      h.pinchProgress = 0;
-      h.releaseGraceUntil = 0;
+        h.pinchProgress = 0;
+        h.releaseGraceUntil = 0;
         if (this.onPinchEnd) this.onPinchEnd(h.slot);
       }
     }
@@ -452,12 +542,10 @@ export class CameraHandTracker {
       await this.video.play();
 
       this.enabled = true;
-      this._hasPrevFlow = false;
       this._hasNewVideoFrame = true;
       this._lastVideoTime = -1;
       this._lastProcessMs = 0;
-      this._flowVelFilter.reset();
-      this._centroidFilter.reset();
+      this._resetFlowTracker();
       this._resetHandStates();
 
       this.smoothVx = 0;
@@ -468,7 +556,6 @@ export class CameraHandTracker {
       this._followGy = 0;
       this._impX = 0;
       this._impY = 0;
-      this.activeBlocks.length = 0;
       this.lastGestureText = 'Wave hand';
       this.lastGestureTime = 0;
 
@@ -479,22 +566,23 @@ export class CameraHandTracker {
           this.activeEngine = 'ai';
           return {
             active: true,
-            message: 'AI Hand Tracking ON! Wave in any direction or pinch to grab cheeks.',
+            message: 'AI Hand Tracking ON! Pinch to pull/click or wave to bounce.',
           };
         }
-        // Start immediately with Sub-pixel Lucas-Kanade while AI model warms up in background!
         this.activeEngine = 'flow';
         this._ensureAIModelLoaded();
         return {
           active: true,
-          message: 'Camera tracking ON! Loading 21-point AI hand model in background...',
+          message: 'Fast Flow active immediately while 21-point AI model loads...',
         };
       }
 
       this.activeEngine = 'flow';
       return {
         active: true,
-        message: 'Sub-pixel Camera Tracking ON! Wave in any direction to bounce.',
+        message: this.airCursorEnabled
+          ? 'Fast Flow + Air Cursor ON! Aim & hold still briefly to grab/click, or wave to bounce.'
+          : 'Fast Flow Tracking ON! Wave in any direction to bounce.',
       };
     } catch (err) {
       const denied = err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError');
@@ -513,7 +601,7 @@ export class CameraHandTracker {
   stop() {
     this._releaseAllPinches();
     this.enabled = false;
-    this._hasPrevFlow = false;
+    this._resetFlowTracker();
     if (this._vfcId && typeof this.video.cancelVideoFrameCallback === 'function') {
       try { this.video.cancelVideoFrameCallback(this._vfcId); } catch {}
     }
@@ -526,8 +614,6 @@ export class CameraHandTracker {
     this._followGy = 0;
     this._impX = 0;
     this._impY = 0;
-    this.activeBlocks.length = 0;
-    this.handCursors.length = 0;
     if (this.stream) {
       for (const track of this.stream.getTracks()) {
         try { track.stop(); } catch {}
@@ -554,11 +640,6 @@ export class CameraHandTracker {
     return { ...res, mirror: this.mirror };
   }
 
-  /**
-   * Called every rAF in Play mode.
-   * Only runs CV when the camera delivers a genuinely NEW frame (0 redundant work!),
-   * and smoothly decays continuous lead/velocity every frame for 120Hz silky physics!
-   */
   update(now, previewCanvas = null) {
     if (!this.enabled || this.paused) {
       this._releaseAllPinches();
@@ -572,7 +653,6 @@ export class CameraHandTracker {
     const isFreshFrame = hasRvfc ? this._hasNewVideoFrame : videoTimeChanged;
 
     if (!isFreshFrame) {
-      // Smooth inter-frame exponential decay of lead force so 60/120Hz display stays buttery smooth
       this._leadGx *= 0.92;
       this._leadGy *= 0.92;
       return Math.hypot(this._leadGx, this._leadGy) > 0.004 || Math.hypot(this._followGx, this._followGy) > 0.004;
@@ -590,7 +670,7 @@ export class CameraHandTracker {
     if (this.activeEngine === 'ai' && this._handLandmarker) {
       active = this._updateAIHands(now, dt);
     } else {
-      active = this._updateSubpixelFlow(now, dt);
+      active = this._updateFastFlow(now, dt);
     }
 
     if (previewCanvas) {
@@ -599,11 +679,7 @@ export class CameraHandTracker {
     return active;
   }
 
-  // ==========================================================================
-  // ENGINE 1: MediaPipe 21-Landmark AI Hand Tracking (Ultra-Granular + Pinch!)
-  // ==========================================================================
   _mapActiveZone(nx, ny) {
-    // Comfortable ergonomic camera box -> full 0..1 viewport reach without stretching arm out of frame
     const u = (nx - 0.13) / 0.74;
     const v = (ny - 0.11) / 0.76;
     return {
@@ -612,13 +688,16 @@ export class CameraHandTracker {
     };
   }
 
+  // ==========================================================================
+  // ENGINE 1: MediaPipe 21-Landmark AI Hand Tracking (Pinch Air Cursor + Wave)
+  // ==========================================================================
   _updateAIHands(now, dt) {
     let result = null;
     try {
       result = this._handLandmarker.detectForVideo(this.video, now);
     } catch {
       this.activeEngine = 'flow';
-      this._hasPrevFlow = false;
+      this._resetFlowTracker();
       this._releaseAllPinches();
       return false;
     }
@@ -626,7 +705,6 @@ export class CameraHandTracker {
     const detected = (result && result.landmarks) ? result.landmarks : [];
     const sensNorm = this.sensitivity / 100;
 
-    // Extract ergonomic stabilized aim point + palm + pinch ratio per detected hand
     const rawHands = detected.map((lms) => {
       const mapX = (x) => (this.mirror ? 1.0 - x : x);
       const palmX = mapX((lms[0].x + lms[5].x + lms[9].x + lms[13].x + lms[17].x) * 0.2);
@@ -644,7 +722,6 @@ export class CameraHandTracker {
       const palmSize = Math.max(0.05, Math.hypot(midX - wristX, midY - wristY));
       const pinchRatio = Math.hypot(indexX - thumbX, indexY - thumbY) / palmSize;
 
-      // Anti-drift hybrid aim point: blends fingertip pinch midpoint (65%) with stable index knuckle (35%)
       const pinchMidX = (thumbX + indexX) * 0.5;
       const pinchMidY = (thumbY + indexY) * 0.5;
       const aimRawX = pinchMidX * 0.65 + indexMcpX * 0.35;
@@ -661,7 +738,6 @@ export class CameraHandTracker {
       };
     });
 
-    // Nearest-neighbor slot assignment so Hand 0 & Hand 1 stay consistent across frames
     const assigned = [null, null];
     if (rawHands.length === 1) {
       const d0 = this._hands[0].present ? Math.hypot(rawHands[0].palmX - this._hands[0].palmX, rawHands[0].palmY - this._hands[0].palmY) : 0.01;
@@ -715,11 +791,9 @@ export class CameraHandTracker {
       h.landmarks = raw.lms;
       presentCount++;
 
-      // Continuous pinch-closeness progress [0..1] (for tactile cursor ring!)
       const prog = Math.max(0, Math.min(1, (0.68 - raw.pinchRatio) / (0.68 - 0.35)));
       h.pinchProgress = prog;
 
-      // Pre-pinch stabilization: gently steady cursor while thumb+index are closing together
       const sNorm = this.smoothness / 100;
       const baseCut = (4.2 - sNorm * 3.1) * 1.25;
       const baseBeta = (0.24 - sNorm * 0.17) * 1.3;
@@ -753,7 +827,6 @@ export class CameraHandTracker {
       h.vx = Math.max(-4.0, Math.min(4.0, fv.x));
       h.vy = Math.max(-4.0, Math.min(4.0, fv.y));
 
-      // Hysteresis pinch detection (thumb tip + index tip)
       if (this.airCursorEnabled) {
         const wasPinching = h.pinching;
         if (!wasPinching && raw.pinchRatio < 0.35) {
@@ -769,6 +842,7 @@ export class CameraHandTracker {
           id: h.slot,
           x: h.pinchX,
           y: h.pinchY,
+          mode: 'pinch',
           pinching: h.pinching,
           pinchProgress: h.pinchProgress,
         });
@@ -786,7 +860,6 @@ export class CameraHandTracker {
       }
     }
 
-    // Only emit wave bounce when allowed (Play mode) and not currently pinching
     if (this.allowWaveBounce && waveHandCount > 0) {
       const vx = waveVxSum / waveHandCount;
       const vy = waveVySum / waveHandCount;
@@ -805,9 +878,10 @@ export class CameraHandTracker {
   }
 
   // ==========================================================================
-  // ENGINE 2: 2-Level Sub-Pixel Pyramid Lucas-Kanade Optical Flow (0ms & Offline)
+  // ENGINE 2: 3-Level Illumination-Invariant Sub-Pixel Pyramid Lucas-Kanade
+  //           + Persistent Hybrid Hand Tracker (Flow + Mean-Shift Air Cursor!)
   // ==========================================================================
-  _lkLevel(prev, curr, w, h, initU, initV, gridStep, winR, iters, maxDisp, minTdiff, collectBlocks) {
+  _lkLevel(prev, curr, ixImg, iyImg, w, h, initU, initV, gridStep, winR, iters, maxDisp, minTdiff, lumaShift, collectBlocks) {
     const margin = winR + 2;
     const vecs = [];
     let centSumX = 0;
@@ -822,30 +896,28 @@ export class CameraHandTracker {
           const row = (cy + dy) * w;
           for (let dx = -winR; dx <= winR; dx += 2) {
             const idx = row + cx + dx;
-            const d = curr[idx] - prev[idx];
+            const d = (curr[idx] - lumaShift) - prev[idx];
             tdiff += d < 0 ? -d : d;
             if (collectBlocks) skinHits += this._skinFine[idx];
           }
         }
         if (tdiff < minTdiff) continue;
 
-        const skinBoost = collectBlocks && skinHits >= 4 ? 1.55 : 1.0;
+        const skinBoost = collectBlocks && skinHits >= 4 ? 1.6 : 1.0;
         if (collectBlocks) {
-          centSumX += ((cx / w) * 2 - 1) * tdiff * skinBoost;
-          centSumY += ((cy / h) * 2 - 1) * tdiff * skinBoost;
+          centSumX += (cx / w) * tdiff * skinBoost;
+          centSumY += (cy / h) * tdiff * skinBoost;
           centSumW += tdiff * skinBoost;
         }
 
-        // Compute spatial structure tensor on prev window
+        // Fast structure tensor using precomputed gradients (zero extra neighbor reads!)
         let gxx = 0, gxy = 0, gyy = 0;
         for (let dy = -winR; dy <= winR; dy += 2) {
-          const r0 = (cy + dy - 1) * w;
-          const r1 = (cy + dy) * w;
-          const r2 = (cy + dy + 1) * w;
+          const row = (cy + dy) * w;
           for (let dx = -winR; dx <= winR; dx += 2) {
-            const px = cx + dx;
-            const ix = 0.5 * (prev[r1 + px + 1] - prev[r1 + px - 1]);
-            const iy = 0.5 * (prev[r2 + px] - prev[r0 + px]);
+            const idx = row + cx + dx;
+            const ix = ixImg[idx];
+            const iy = iyImg[idx];
             gxx += ix * ix;
             gxy += ix * iy;
             gyy += iy * iy;
@@ -854,9 +926,9 @@ export class CameraHandTracker {
 
         const det = gxx * gyy - gxy * gxy;
         const trace = gxx + gyy;
-        if (trace < 30.0 || det < 1e-3) continue;
+        if (trace < 28.0 || det < 1e-3) continue;
         const disc = Math.max(0, (gxx - gyy) * (gxx - gyy) + 4 * gxy * gxy);
-        if (0.5 * (trace - Math.sqrt(disc)) < 8.0) continue;
+        if (0.5 * (trace - Math.sqrt(disc)) < 7.0) continue;
 
         const invDet = 1.0 / det;
         let u = initU;
@@ -866,16 +938,13 @@ export class CameraHandTracker {
           let bx = 0, by = 0;
           for (let dy = -winR; dy <= winR; dy += 2) {
             const py = cy + dy;
-            const r0 = (py - 1) * w;
-            const r1 = py * w;
-            const r2 = (py + 1) * w;
+            const row = py * w;
             for (let dx = -winR; dx <= winR; dx += 2) {
               const px = cx + dx;
-              const ix = 0.5 * (prev[r1 + px + 1] - prev[r1 + px - 1]);
-              const iy = 0.5 * (prev[r2 + px] - prev[r0 + px]);
-              const dtVal = sampleBilinear(curr, w, h, px + u, py + v) - prev[r1 + px];
-              bx += ix * dtVal;
-              by += iy * dtVal;
+              const idx = row + px;
+              const dtVal = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[idx];
+              bx += ixImg[idx] * dtVal;
+              by += iyImg[idx] * dtVal;
             }
           }
           const du = -(gyy * bx - gxy * by) * invDet;
@@ -886,15 +955,15 @@ export class CameraHandTracker {
         }
 
         const mag = Math.hypot(u, v);
-        if (mag > maxDisp || mag < 0.03) continue;
+        if (mag > maxDisp || mag < 0.025) continue;
 
         let resAfter = 0;
         for (let dy = -winR; dy <= winR; dy += 2) {
           const py = cy + dy;
-          const r1 = py * w;
+          const row = py * w;
           for (let dx = -winR; dx <= winR; dx += 2) {
             const px = cx + dx;
-            const d = sampleBilinear(curr, w, h, px + u, py + v) - prev[r1 + px];
+            const d = (sampleBilinear(curr, w, h, px + u, py + v) - lumaShift) - prev[row + px];
             resAfter += d < 0 ? -d : d;
           }
         }
@@ -906,34 +975,235 @@ export class CameraHandTracker {
       }
     }
 
-    if (vecs.length < 3) {
-      return { u: 0, v: 0, centSumX, centSumY, centSumW };
+    if (vecs.length < 2) {
+      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
     }
 
-    vecs.sort((a, b) => b.weight - a.weight);
-    const keepN = Math.max(3, Math.floor(vecs.length * 0.6));
+    // Huber-reweighted median consensus — kills shadow/hair outliers cleanly!
+    const us = vecs.map((v) => v.u);
+    const vs = vecs.map((v) => v.v);
+    const medU = medianOf(us);
+    const medV = medianOf(vs);
+
     let sw = 0, su = 0, sv = 0, smag = 0;
-    for (let i = 0; i < keepN; i++) {
+    for (let i = 0; i < vecs.length; i++) {
       const c = vecs[i];
-      sw += c.weight;
-      su += c.weight * c.u;
-      sv += c.weight * c.v;
-      smag += c.weight * Math.hypot(c.u, c.v);
-      if (collectBlocks) {
-        this.activeBlocks.push({ x: c.cx / w, y: c.cy / h });
+      const dist = Math.hypot(c.u - medU, c.v - medV);
+      const hw = c.weight / (1.0 + (dist / 1.8) * (dist / 1.8));
+      sw += hw;
+      su += hw * c.u;
+      sv += hw * c.v;
+      smag += hw * Math.hypot(c.u, c.v);
+      if (collectBlocks && dist < 3.6) {
+        this.activeBlocks.push({ x: c.cx / w, y: c.cy / h, u: c.u, v: c.v });
       }
     }
 
+    if (sw <= 1e-6) {
+      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
+    }
     const ux = su / sw;
     const uy = sv / sw;
     const coherence = Math.hypot(ux, uy) / Math.max(1e-5, smag / sw);
-    if (coherence < 0.50) {
-      return { u: 0, v: 0, centSumX, centSumY, centSumW };
+    if (coherence < 0.46) {
+      return { u: 0, v: 0, vecs, centSumX, centSumY, centSumW };
     }
-    return { u: ux, v: uy, centSumX, centSumY, centSumW };
+    return { u: ux, v: uy, vecs, centSumX, centSumY, centSumW };
   }
 
-  _updateSubpixelFlow(now, dt) {
+  _updateFlowHandCursor(now, dt, fine, lumaShift) {
+    const fh = this._flowHand;
+    const nPx = FW * FH;
+    const curr = this._currFine;
+    const prev = this._prevFine;
+    const bg = this._bgFine;
+    const heat = this._heatFine;
+    const skin = this._skinFine;
+    const sal = this._salFine;
+
+    // 1. Update adaptive background model + per-pixel motion heat + salience map
+    let movedPx = 0;
+    for (let i = 0; i < nPx; i++) {
+      const diffPrev = Math.abs((curr[i] - lumaShift) - prev[i]);
+      if (diffPrev > 9.0) {
+        movedPx++;
+        heat[i] = Math.min(80, heat[i] * 0.72 + diffPrev * 1.45);
+      } else {
+        heat[i] *= 0.86;
+      }
+      // Adapt background ONLY on quiet pixels so a paused hand stays bright in foreground!
+      if (diffPrev < 5.5 && heat[i] < 4.0) {
+        bg[i] = bg[i] * 0.985 + curr[i] * 0.015;
+      }
+      const fgDiff = Math.abs(curr[i] - bg[i]);
+      const fgSignal = fgDiff > 13.0 ? (fgDiff - 13.0) : 0;
+      const skinMul = skin[i] ? 1.85 : 0.75;
+      sal[i] = (fgSignal * 0.85 + heat[i] * 1.35) * skinMul;
+    }
+
+    // If camera itself was bumped/moved (>58% of pixels changed at once), rapidly re-learn background
+    if (movedPx > nPx * 0.58) {
+      for (let i = 0; i < nPx; i++) {
+        bg[i] = bg[i] * 0.5 + curr[i] * 0.5;
+      }
+    }
+
+    // 2. Acquire hand on first coherent motion (or strong foreground-skin peak)
+    const hasFlowMotion = fine.vecs.length >= 2 && (Math.abs(fine.u) > 0.04 || Math.abs(fine.v) > 0.04);
+
+    if (!fh.present) {
+      if (hasFlowMotion) {
+        // Seed directly at the moving hand blocks!
+        let sx = 0, sy = 0, sw = 0;
+        for (let i = 0; i < fine.vecs.length; i++) {
+          const c = fine.vecs[i];
+          sx += (c.cx / FW) * c.weight;
+          sy += (c.cy / FH) * c.weight;
+          sw += c.weight;
+        }
+        if (sw > 0) {
+          fh.rawX = sx / sw;
+          fh.rawY = sy / sw;
+          fh.present = true;
+          fh.lastSeenMs = now;
+          fh.lastActiveMs = now;
+          fh.confidence = 1.0;
+          this._flowCursorFilter.reset();
+        }
+      } else {
+        // Fallback: check for a clear foreground+skin hand held up in the active frame
+        let bestS = 0, bestX = 0.5, bestY = 0.5;
+        for (let gy = 8; gy < FH - 8; gy += 6) {
+          for (let gx = 8; gx < FW - 8; gx += 6) {
+            let local = 0;
+            for (let dy = -4; dy <= 4; dy += 2) {
+              const row = (gy + dy) * FW;
+              for (let dx = -4; dx <= 4; dx += 2) {
+                local += sal[row + gx + dx];
+              }
+            }
+            if (local > bestS) {
+              bestS = local;
+              bestX = gx / FW;
+              bestY = gy / FH;
+            }
+          }
+        }
+        if (bestS > 520) {
+          fh.rawX = bestX;
+          fh.rawY = bestY;
+          fh.present = true;
+          fh.lastSeenMs = now;
+          fh.lastActiveMs = now;
+          fh.confidence = 0.8;
+          this._flowCursorFilter.reset();
+        }
+      }
+    } else {
+      // 3. Hybrid Tracking: Sub-pixel Optical Flow Prediction + 2-Step Local Gaussian Mean-Shift!
+      let predU = 0;
+      let predV = 0;
+      let localFlowW = 0;
+
+      if (hasFlowMotion) {
+        const hxPx = fh.rawX * FW;
+        const hyPx = fh.rawY * FH;
+        const localR = 26;
+        for (let i = 0; i < fine.vecs.length; i++) {
+          const c = fine.vecs[i];
+          const d = Math.hypot(c.cx - hxPx, c.cy - hyPx);
+          if (d < localR) {
+            const w = c.weight * (1.0 - d / localR);
+            predU += c.u * w;
+            predV += c.v * w;
+            localFlowW += w;
+          }
+        }
+        if (localFlowW > 0) {
+          predU /= localFlowW;
+          predV /= localFlowW;
+        } else if (Math.hypot(fine.u, fine.v) > 1.2) {
+          // Fast wave moved outside localR in 1 frame — follow consensus flow!
+          predU = fine.u;
+          predV = fine.v;
+        }
+      }
+
+      // Advance by exact sub-pixel optical flow displacement!
+      fh.rawX = Math.max(0.04, Math.min(0.96, fh.rawX + predU / FW));
+      fh.rawY = Math.max(0.04, Math.min(0.96, fh.rawY + predV / FH));
+
+      // 2-step local Gaussian Mean-Shift on salience map to keep centered & prevent drift!
+      let localEnergy = 0;
+      const winR = 14;
+      const inv2Sig2 = 1.0 / (2.0 * 7.5 * 7.5);
+      for (let iter = 0; iter < 2; iter++) {
+        const cx = Math.round(fh.rawX * FW);
+        const cy = Math.round(fh.rawY * FH);
+        let mx = 0, my = 0, mw = 0;
+        const y0 = Math.max(2, cy - winR);
+        const y1 = Math.min(FH - 3, cy + winR);
+        const x0 = Math.max(2, cx - winR);
+        const x1 = Math.min(FW - 3, cx + winR);
+
+        for (let y = y0; y <= y1; y += 2) {
+          const dy = y - cy;
+          const row = y * FW;
+          for (let x = x0; x <= x1; x += 2) {
+            const sVal = sal[row + x];
+            if (sVal <= 2.0) continue;
+            const dx = x - cx;
+            const gw = sVal * Math.exp(-(dx * dx + dy * dy) * inv2Sig2);
+            mx += x * gw;
+            my += y * gw;
+            mw += gw;
+          }
+        }
+
+        if (iter === 0) localEnergy = mw;
+        if (mw > 45) {
+          const targetX = (mx / mw) / FW;
+          const targetY = (my / mw) / FH;
+          // Gentle snap when moving (flow dominates!), firmer lock when still!
+          const pull = localFlowW > 0 ? 0.20 : 0.28;
+          fh.rawX += (targetX - fh.rawX) * pull;
+          fh.rawY += (targetY - fh.rawY) * pull;
+        }
+      }
+
+      if (localEnergy > 80 || localFlowW > 0) {
+        fh.lastSeenMs = now;
+        if (localFlowW > 0) fh.lastActiveMs = now;
+        fh.confidence = Math.min(1, fh.confidence + 0.15);
+      } else {
+        fh.confidence *= 0.92;
+      }
+
+      // If hand leaves frame completely (no foreground/skin salience for > 1.8s), drop cursor cleanly
+      if (now - fh.lastSeenMs > 1800) {
+        fh.present = false;
+        fh.confidence = 0;
+      }
+    }
+
+    if (fh.present && this.airCursorEnabled) {
+      const mapped = this._mapActiveZone(fh.rawX, fh.rawY);
+      const filtered = this._flowCursorFilter.filter(mapped.x, mapped.y, dt);
+      fh.cursorX = filtered.x;
+      fh.cursorY = filtered.y;
+
+      this.handCursors.push({
+        id: 0,
+        x: fh.cursorX,
+        y: fh.cursorY,
+        mode: 'dwell',
+        pinching: false,
+        pinchProgress: 0,
+      });
+    }
+  }
+
+  _updateFastFlow(now, dt) {
     this.handCursors.length = 0;
     const pctx = this.procCtx;
     pctx.save();
@@ -948,58 +1218,102 @@ export class CameraHandTracker {
     const rawFine = this._rawFine;
     const skin = this._skinFine;
     const nPx = FW * FH;
+    let sumCurr = 0;
+
     for (let i = 0; i < nPx; i++) {
       const p = i << 2;
       const r = rgba[p];
       const g = rgba[p + 1];
       const b = rgba[p + 2];
-      rawFine[i] = (77 * r + 150 * g + 29 * b) * (1 / 256);
+      const yVal = (77 * r + 150 * g + 29 * b) * (1 / 256);
+      rawFine[i] = yVal;
+      sumCurr += yVal;
       const cb = 128 + ((-43 * r - 85 * g + 128 * b) >> 8);
       const cr = 128 + ((128 * r - 107 * g - 21 * b) >> 8);
       skin[i] = (cb >= 77 && cb <= 127 && cr >= 133 && cr <= 173) ? 1 : 0;
     }
 
-    // Build smoothed 2-level Gaussian pyramid (96x72 -> 48x36)
+    // Build 3-level smoothed Gaussian pyramid (96x72 -> 48x36 -> 24x18)
     smoothBox(rawFine, this._tmpFine, this._currFine, FW, FH);
     downsample2x(this._currFine, this._rawCoarse, FW, FH);
     smoothBox(this._rawCoarse, this._tmpCoarse, this._currCoarse, CW, CH);
+    downsample2x(this._currCoarse, this._rawTiny, CW, CH);
+    smoothBox(this._rawTiny, this._tmpTiny, this._currTiny, TW, TH);
+
+    if (!this._hasBg) {
+      this._bgFine.set(this._currFine);
+      this._hasBg = true;
+    }
 
     if (!this._hasPrevFlow) {
       this._prevFine.set(this._currFine);
       this._prevCoarse.set(this._currCoarse);
+      this._prevTiny.set(this._currTiny);
       this._hasPrevFlow = true;
       return false;
     }
 
+    // Global auto-exposure shift cancellation!
+    let sumPrev = 0;
+    const prevFine = this._prevFine;
+    for (let i = 0; i < nPx; i++) sumPrev += prevFine[i];
+    const lumaShift = (sumCurr - sumPrev) / nPx;
+
+    // Precompute spatial gradients once per pyramid level
+    computeGradients(this._prevTiny, this._ixTiny, this._iyTiny, TW, TH);
+    computeGradients(this._prevCoarse, this._ixCoarse, this._iyCoarse, CW, CH);
+    computeGradients(this._prevFine, this._ixFine, this._iyFine, FW, FH);
+
     this.activeBlocks.length = 0;
+    const tiny = this._lkLevel(
+      this._prevTiny, this._currTiny, this._ixTiny, this._iyTiny, TW, TH,
+      0, 0, 3, 2, 3, 5.5, 10.0, lumaShift, false
+    );
     const coarse = this._lkLevel(
-      this._prevCoarse, this._currCoarse, CW, CH,
-      0, 0, 5, 3, 3, 6.0, 18.0, false
+      this._prevCoarse, this._currCoarse, this._ixCoarse, this._iyCoarse, CW, CH,
+      tiny.u * 2.0, tiny.v * 2.0, 5, 3, 3, 11.0, 16.0, lumaShift, false
     );
     const fine = this._lkLevel(
-      this._prevFine, this._currFine, FW, FH,
-      coarse.u * 2.0, coarse.v * 2.0, 7, 4, 3, 12.0, 26.0, true
+      this._prevFine, this._currFine, this._ixFine, this._iyFine, FW, FH,
+      coarse.u * 2.0, coarse.v * 2.0, 6, 4, 3, 22.0, 24.0, lumaShift, true
     );
+
+    // Update persistent Fast Flow Hand Cursor (before overwriting prevFine!)
+    this._updateFlowHandCursor(now, dt, fine, lumaShift);
 
     this._prevFine.set(this._currFine);
     this._prevCoarse.set(this._currCoarse);
+    this._prevTiny.set(this._currTiny);
 
     // Convert fine sub-pixel displacement -> normalized screen-widths / second
     const rawVx = (fine.u / FW) / dt;
     const rawVy = (fine.v / FH) / dt;
     const fv = this._flowVelFilter.filter(rawVx, rawVy, dt);
-    const vx = Math.max(-4.0, Math.min(4.0, fv.x));
-    const vy = Math.max(-4.0, Math.min(4.0, fv.y));
+    const vx = Math.max(-4.5, Math.min(4.5, fv.x));
+    const vy = Math.max(-4.5, Math.min(4.5, fv.y));
     this.smoothVx = vx * 0.55;
     this.smoothVy = vy * 0.55;
+
+    // Mute wave-bounce while a Fast Flow Air Cursor Dwell-Grab is actively pulling a cheek!
+    if (!this.allowWaveBounce || this._externalGrabActive || now < this._externalReleaseGraceUntil) {
+      this._leadGx *= 0.80;
+      this._leadGy *= 0.80;
+      this._followGx *= 0.85;
+      this._followGy *= 0.85;
+      return this._externalGrabActive;
+    }
 
     let centX = 0;
     let centY = 0;
     let hasCent = 0;
-    if (fine.centSumW > 380) {
+    if (this._flowHand.present) {
+      centX = this._flowHand.rawX * 2 - 1;
+      centY = this._flowHand.rawY * 2 - 1;
+      hasCent = 1;
+    } else if (fine.centSumW > 380) {
       const fc = this._centroidFilter.filter(
-        Math.max(-1, Math.min(1, fine.centSumX / fine.centSumW)),
-        Math.max(-1, Math.min(1, fine.centSumY / fine.centSumW)),
+        Math.max(-1, Math.min(1, (fine.centSumX / fine.centSumW) * 2 - 1)),
+        Math.max(-1, Math.min(1, (fine.centSumY / fine.centSumW) * 2 - 1)),
         dt
       );
       centX = fc.x;
@@ -1007,7 +1321,6 @@ export class CameraHandTracker {
       hasCent = 1;
     }
 
-    if (!this.allowWaveBounce) { this._leadGx *= 0.8; this._leadGy *= 0.8; return false; }
     return this._applyContinuousWavePhysics(vx, vy, dt, now, this.sensitivity / 100, false, hasCent, centX, centY, false);
   }
 
@@ -1015,8 +1328,10 @@ export class CameraHandTracker {
   // Unified Silky-Smooth Continuous 360° Wave Coupling (No Steppy Cooldowns!)
   // ==========================================================================
   _applyContinuousWavePhysics(vx, vy, dt, now, sensNorm, isAI, presentCount, centSumX, centSumY, anyPinching) {
-    // Micro deadzone preserves tiny granular gestures while staying 100% calm at rest
-    const deadzone = isAI ? (this.airCursorEnabled ? (0.42 - sensNorm * 0.14) : (0.10 - sensNorm * 0.05)) : (0.14 - sensNorm * 0.06);
+    // Higher wave deadzone when Air Cursor is active so calm aiming stays rock steady, while brisk waves still bounce!
+    const deadzone = this.airCursorEnabled
+      ? (isAI ? (0.42 - sensNorm * 0.14) : (0.46 - sensNorm * 0.16))
+      : (isAI ? (0.10 - sensNorm * 0.05) : (0.11 - sensNorm * 0.05));
     const speed = Math.hypot(vx, vy);
     let active = anyPinching;
 
@@ -1025,19 +1340,16 @@ export class CameraHandTracker {
       const ux = vx / speed;
       const uy = vy / speed;
 
-      // 1. Continuous silky lead-displacement target (gives immediate ultra-granular feel on gentle moves!)
       const leadMag = Math.min(1.15, excess * (0.38 + sensNorm * 0.55));
       this._leadGx += (ux * leadMag - this._leadGx) * 0.45;
       this._leadGy += (uy * leadMag - this._leadGy) * 0.45;
 
-      // 2. Smooth dt-normalized elastic bounce impulse (proportional to velocity^1.22, zero steppy jumps!)
       const shaped = Math.pow(Math.min(2.6, excess), 1.22);
       const gain = (165 + sensNorm * 240) * dt * shaped;
       this._impX += ux * gain;
       this._impY += uy * gain;
       active = true;
 
-      // Live directional badge + soft boing audio on brisk waves
       if (excess > 0.22) {
         const label = directionLabel(ux, uy);
         this.lastGestureText = label;
@@ -1053,7 +1365,6 @@ export class CameraHandTracker {
       this._leadGy *= 0.80;
     }
 
-    // Optional Follow-Hand continuous lean
     if (this.followEnabled && presentCount > 0) {
       const fScale = 0.48 + sensNorm * 0.62;
       const tx = (centSumX / presentCount) * fScale;
@@ -1066,7 +1377,6 @@ export class CameraHandTracker {
       this._followGy *= 0.86;
     }
 
-    // Safe single-frame impulse clamp
     this._impX = Math.max(-18, Math.min(18, this._impX));
     this._impY = Math.max(-18, Math.min(18, this._impY));
 
@@ -1103,7 +1413,6 @@ export class CameraHandTracker {
     ctx.fillRect(0, 0, w, h);
 
     if (this.activeEngine === 'ai') {
-      // Draw crisp 21-joint hand skeletons + pinch glow!
       for (const hand of this._hands) {
         if (!hand.present || !hand.landmarks) continue;
         const lms = hand.landmarks;
@@ -1140,13 +1449,42 @@ export class CameraHandTracker {
         }
         ctx.restore();
       }
-    } else if (this.activeBlocks.length > 0) {
-      ctx.fillStyle = 'rgba(255, 143, 171, 0.55)';
-      for (let i = 0; i < this.activeBlocks.length; i++) {
-        const b = this.activeBlocks[i];
+    } else {
+      // Fast Flow: draw sub-pixel directional flow needles + persistent hand reticle!
+      if (this.activeBlocks.length > 0) {
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 150, 185, 0.78)';
+        ctx.lineWidth = 1.4;
+        ctx.lineCap = 'round';
         ctx.beginPath();
-        ctx.arc(b.x * w, b.y * h, 2.6, 0, Math.PI * 2);
+        for (let i = 0; i < this.activeBlocks.length; i++) {
+          const b = this.activeBlocks[i];
+          const bx = b.x * w;
+          const by = b.y * h;
+          ctx.moveTo(bx, by);
+          ctx.lineTo(bx + b.u * 1.9, by + b.v * 1.9);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (this._flowHand.present) {
+        const hx = this._flowHand.rawX * w;
+        const hy = this._flowHand.rawY * h;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(hx, hy, this._externalGrabActive ? 11 : 9, 0, Math.PI * 2);
+        ctx.fillStyle = this._externalGrabActive ? 'rgba(255, 79, 134, 0.42)' : 'rgba(255, 143, 171, 0.22)';
         ctx.fill();
+        ctx.lineWidth = 1.8;
+        ctx.strokeStyle = this._externalGrabActive ? '#ff4f86' : '#ffffff';
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(hx, hy, 2.3, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.restore();
       }
     }
 

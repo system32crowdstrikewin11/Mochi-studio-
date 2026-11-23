@@ -1,4 +1,4 @@
-# Mochi Studio v21
+# Mochi Studio v22
 
 Interactive squishy artwork studio built with **HTML5**, **CSS3**, **GLSL ES 3.00 (WebGL2)**, **ES Modules JavaScript**, **WebCodecs + Pure-JS WebM Muxer**, **Adaptive 256-Color GIF Web Worker**, and **Web Audio API**.
 
@@ -30,7 +30,7 @@ Open `http://localhost:25565` in your mobile or desktop browser.
 - **EXIF-Aware Image Import:**
   - Global drag-and-drop anywhere on the page, Ctrl+V paste, file picker, or built-in samples, auto-oriented from EXIF and smoothly capped at 2048px.
 - **Camera Hand Gesture Tracking (360° Directional Bounce):**
-  - Tap **Camera** in Play mode to bounce the mochi in any direction (**Up, Down, Left, Right, or Diagonals**) by waving your hand in front of the camera—Dual-engine real-time tracking: **AI 21-Point Hand Tracking** (MediaPipe HandLandmarker with 1-Euro adaptive filter, 21-joint skeleton preview, continuous 360° wave bounce, full site-wide **Air Cursor** where thumb+index pinch acts as a real long-press/click to pull cheeks with two hands, paint masks, click buttons/tabs, scrub sliders, and scroll Settings!) plus an instant-start / offline **2-Level Sub-Pixel Pyramid Lucas-Kanade Optical Flow** engine.
+  - Tap **Camera** in Play mode to bounce the mochi in any direction (**Up, Down, Left, Right, or Diagonals**) by waving your hand in front of the camera—Dual-engine real-time tracking: **AI 21-Point Hand Tracking** (MediaPipe HandLandmarker with 1-Euro adaptive filter, 21-joint skeleton preview, continuous 360° wave bounce, full site-wide **Air Cursor** where thumb+index pinch acts as a real long-press/click to pull cheeks with two hands, paint masks, click buttons/tabs, scrub sliders, and scroll Settings!) plus an instant-start / offline **3-Level Illumination-Invariant Sub-Pixel Pyramid Lucas-Kanade Fast Flow** engine with persistent hand tracking and Hold-to-Grab / Dwell Air Cursor!
 - **Optional Phone Motion Sensors:**
   - Real-time tilt gravity & shake jiggle plus an interactive **Virtual Tilt Pad**.
 - **Direct Engine Video & Adaptive GIF Recording + Preview/Share Modal:**

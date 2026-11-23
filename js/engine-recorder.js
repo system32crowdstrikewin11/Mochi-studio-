@@ -1,5 +1,5 @@
 /**
- * EngineRecorder v21 — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS)
+ * EngineRecorder v22 — Direct Engine-Driven Video (60 / 90 / 120 / Custom FPS)
  * & Adaptive 256-Color Web Worker GIF (Default 15 FPS, Optional up to 60 FPS)
  *
  * - Video (Primary): WebCodecs VideoEncoder + MiniWebmMuxer with exact 0.1ms engine timestamps

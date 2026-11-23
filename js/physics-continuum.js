@@ -264,6 +264,15 @@ export class MochiPhysicsContinuum {
     return { x: u, y: v };
   }
 
+  /** Non-mutating hit check for Air Cursor dwell-lock (ignores empty canvas background!) */
+  canGrabAt(isoX, isoY) {
+    const uv = this.invert(isoX, isoY);
+    if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1) return false;
+    if (this.alphaSample(uv.x, uv.y) < 0.05) return false;
+    const weight = this.maskEnabled ? this.maskSample(uv.x, uv.y) : 1;
+    return weight >= 0.05;
+  }
+
   /** Try grabbing at isotropic point (isoX, isoY). Returns grab object or null if outside artwork/mask. */
   tryGrab(pointerId, isoX, isoY) {
     if (this.grabs.length >= PHYSICS_CFG.maxGrabs) {

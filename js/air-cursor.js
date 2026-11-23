@@ -1,25 +1,32 @@
 /**
- * AirCursorController v21 — Full Site-Wide Hand-Tracked Air Cursor
+ * AirCursorController v22 — Dual-Mode Site-Wide Hand-Tracked Air Cursor
  *
- * Turns hand tracking into an actual site-wide cursor with tactile feedback:
- * - Play Mode Canvas: Pinch & Hold (long press) grabs the exact spot under the
- *   cursor and moving your hand pulls/stretches it (up to 2 hands simultaneously!).
- *   Releasing the pinch snaps it back with full mochi bounce + wobble audio.
- * - Paint Mode Canvas: Hover moves the live brush cursor; Pinch & Hold paints
- *   or erases directly on the squishy mask with full Undo/Redo support.
- * - Site-Wide UI: Hover highlights buttons, tabs, checkboxes, presets & sliders.
- *   Quick Pinch clicks controls; Pinch & Drag on any range slider scrubs its value
- *   smoothly; Pinch & Drag on the Settings sheet scrolls vertically.
+ * Works seamlessly with BOTH tracking engines:
+ * 1. AI Hands (`mode: 'pinch'`):
+ *    - Thumb + Index Pinch & Hold = Long-Press Grab & Pull (2 hands simultaneously!),
+ *      Mid-Air Paint strokes, Range Slider scrubbing, or Settings scrolling.
+ *    - Quick Pinch = Click any button, tab, sample, preset, or checkbox.
+ * 2. Fast Flow (`mode: 'dwell'` — 100% offline & 0ms startup!):
+ *    - Hover & Hold Still (~0.42s) fills the tactile pink progress ring:
+ *      * On Buttons / Tabs / Checkboxes -> fires a clean Click!
+ *      * On Mochi Character / Paint Canvas / Range Slider -> locks Long-Press Grab!
+ *        Moving your hand now pulls & stretches that exact spot (or paints / scrubs)!
+ *    - Hold Still again (~0.52s) while grabbed fills a crisp white/mint release ring
+ *      and snaps back with full mochi bounce + wobble audio!
  */
 
 const CLICK_COOLDOWN_MS = 320;
+const DWELL_LOCK_MS = 420;
+const DWELL_RELEASE_MS = 520;
+const DWELL_REARM_MS = 700;
+const DWELL_STILL_RADIUS_PX = 18;
 const DRAG_DEADZONE_PX = 6;
 
 export class AirCursorController {
   constructor(canvas, hooks) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.hooks = hooks; // { getStep, glCanvas, onPlayGrabStart, onPlayGrabMove, onPlayGrabEnd, onPaintHover, onPaintStart, onPaintMove, onPaintEnd }
+    this.hooks = hooks;
 
     this.enabled = true;
     this.cssW = 1;
@@ -28,12 +35,12 @@ export class AirCursorController {
     this._hasDrawn = false;
 
     this._hoveredEl = null;
-    this._ripples = []; // { x, y, r, alpha, color }
+    this._ripples = [];
 
-    // Per-hand interaction state (slots 0 and 1)
     this._slots = [0, 1].map((slot) => ({
       slot,
       mode: 'idle', // 'idle' | 'play-grab' | 'paint' | 'ui-press' | 'slider' | 'scroll'
+      inputMode: 'pinch', // 'pinch' | 'dwell'
       targetEl: null,
       startX: 0,
       startY: 0,
@@ -42,6 +49,15 @@ export class AirCursorController {
       scrollStartTop: 0,
       lastClickMs: 0,
       moved: false,
+
+      // Fast Flow Dwell-Lock / Dwell-Release state
+      dwellAnchorX: 0,
+      dwellAnchorY: 0,
+      dwellStartMs: 0,
+      dwellProgress: 0,     // 0..1 lock progress
+      releaseProgress: 0,   // 0..1 release countdown progress while grabbed
+      dwellRearmUntil: 0,
+      dwellStatus: '',
     }));
 
     this.resize();
@@ -61,25 +77,19 @@ export class AirCursorController {
 
   _setHovered(el) {
     if (this._hoveredEl === el) return;
-    if (this._hoveredEl) {
-      this._hoveredEl.classList.remove('air-hover');
-    }
+    if (this._hoveredEl) this._hoveredEl.classList.remove('air-hover');
     this._hoveredEl = el;
-    if (this._hoveredEl) {
-      this._hoveredEl.classList.add('air-hover');
-    }
+    if (this._hoveredEl) this._hoveredEl.classList.add('air-hover');
   }
 
   _spawnRipple(x, y, color = '#ff5a8d') {
     this._ripples.push({ x, y, r: 8, maxR: 34, alpha: 0.72, color });
   }
 
-  /** Identify the interactive element (or canvas / slider / scrollable sheet) at viewport (x, y) */
   _hitTest(x, y) {
     const raw = document.elementFromPoint(x, y);
     if (!raw) return { kind: 'none', el: null };
 
-    // 1. Range slider (either directly or inside its label container)
     if (raw.matches && raw.matches('input[type="range"]')) {
       return { kind: 'slider', el: raw };
     }
@@ -94,23 +104,19 @@ export class AirCursorController {
       }
     }
 
-    // 2. Clickable UI controls (buttons, checkboxes, labels, links)
     const clickable = raw.closest && raw.closest('button:not(:disabled), a[href], label, input[type="checkbox"]');
     if (clickable) {
       return { kind: 'click', el: clickable };
     }
 
-    // 3. Stage WebGL canvas (for Play cheek pull or Paint brush strokes)
     if (raw === this.hooks.glCanvas) {
       return { kind: 'canvas', el: raw };
     }
 
-    // 4. Backdrop dismiss (Settings / Preview modal backdrop)
     if (raw.id === 'settingsBackdrop' || raw.id === 'previewModal') {
       return { kind: 'click', el: raw };
     }
 
-    // 5. Scrollable Settings sheet background
     const sheet = raw.closest && raw.closest('.settings-sheet, .preview-card');
     if (sheet && sheet.scrollHeight > sheet.clientHeight + 4) {
       return { kind: 'scroll', el: sheet };
@@ -140,6 +146,12 @@ export class AirCursorController {
     }
   }
 
+  _resetDwell(st) {
+    st.dwellStartMs = 0;
+    st.dwellProgress = 0;
+    st.releaseProgress = 0;
+  }
+
   _endSlot(st, now, cx, cy, allowClick) {
     if (st.mode === 'play-grab') {
       this.hooks.onPlayGrabEnd(st.slot);
@@ -152,7 +164,6 @@ export class AirCursorController {
       if (now - st.lastClickMs >= CLICK_COOLDOWN_MS) {
         st.lastClickMs = now;
         const target = st.targetEl;
-        // Ensure we're still reasonably close to the element we pressed
         const r = target.getBoundingClientRect();
         const pad = 26;
         if (cx >= r.left - pad && cx <= r.right + pad && cy >= r.top - pad && cy <= r.bottom + pad) {
@@ -165,6 +176,7 @@ export class AirCursorController {
     st.mode = 'idle';
     st.targetEl = null;
     st.moved = false;
+    this._resetDwell(st);
   }
 
   resetAll() {
@@ -173,7 +185,10 @@ export class AirCursorController {
     for (const st of this._slots) {
       if (st.mode !== 'idle') {
         this._endSlot(st, now, st.lastX, st.lastY, false);
+      } else {
+        this._resetDwell(st);
       }
+      st.dwellStatus = '';
     }
     if (this._hasDrawn) {
       this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -181,15 +196,147 @@ export class AirCursorController {
     }
   }
 
-  /** Returns true if any hand is currently pinching or interacting with the site */
   isAnyHandBusy() {
     return this._slots[0].mode !== 'idle' || this._slots[1].mode !== 'idle';
   }
 
-  /**
-   * Called every rAF with live hand cursors from CameraHandTracker:
-   * cursors: [{ id, x, y, pinching, pinchProgress }] where x, y are [0..1] viewport coordinates
-   */
+  getStatusBadge() {
+    const s0 = this._slots[0];
+    if (s0.inputMode === 'dwell' && s0.mode !== 'idle') {
+      if (s0.mode === 'play-grab') return '✊ Pull!';
+      if (s0.mode === 'paint') return '🖌 Paint!';
+      if (s0.mode === 'slider') return '↔ Scrub';
+    }
+    return '';
+  }
+
+  _updateDwellSlot(st, now, cx, cy, hit, step) {
+    // 1. If currently locked into a drag/grab/paint/slider:
+    if (st.mode !== 'idle') {
+      st.dwellProgress = 1;
+      if (st.mode === 'play-grab') {
+        this.hooks.onPlayGrabMove(st.slot, cx, cy);
+      } else if (st.mode === 'paint') {
+        this.hooks.onPaintMove(cx, cy);
+      } else if (st.mode === 'slider' && st.targetEl) {
+        this._scrubSlider(st.targetEl, cx);
+      } else if (st.mode === 'scroll' && st.targetEl) {
+        st.targetEl.scrollTop = st.scrollStartTop - (cy - st.startY) * 1.45;
+      }
+
+      // Check if user paused hand steady to release!
+      const distFromAnchor = Math.hypot(cx - st.dwellAnchorX, cy - st.dwellAnchorY);
+      if (distFromAnchor > DWELL_STILL_RADIUS_PX) {
+        st.dwellAnchorX = cx;
+        st.dwellAnchorY = cy;
+        st.dwellStartMs = now;
+        st.releaseProgress = 0;
+        st.moved = true;
+      } else {
+        if (st.dwellStartMs === 0) {
+          st.dwellStartMs = now;
+          st.dwellAnchorX = cx;
+          st.dwellAnchorY = cy;
+        }
+        const elapsed = now - st.dwellStartMs;
+        // Wait 140ms before starting release arc so quick pauses mid-stretch feel natural
+        if (elapsed > 140) {
+          st.releaseProgress = Math.min(1, (elapsed - 140) / DWELL_RELEASE_MS);
+          if (st.releaseProgress >= 1) {
+            st.dwellRearmUntil = now + DWELL_REARM_MS;
+            this._endSlot(st, now, cx, cy, false);
+          }
+        } else {
+          st.releaseProgress = 0;
+        }
+      }
+      return;
+    }
+
+    // 2. IDLE state in Dwell mode: check if hovering over something actionable
+    const canInteract =
+      hit.kind === 'click' ||
+      hit.kind === 'slider' ||
+      hit.kind === 'scroll' ||
+      (hit.kind === 'canvas' && (step === 'play' || step === 'paint') &&
+        (step !== 'play' || !this.hooks.canPlayGrabAt || this.hooks.canPlayGrabAt(cx, cy)));
+
+    if (!canInteract) {
+      this._resetDwell(st);
+      return;
+    }
+
+    // Re-arm immediately if user moved away from last click/release point
+    const distFromAnchor = Math.hypot(cx - st.dwellAnchorX, cy - st.dwellAnchorY);
+    if (distFromAnchor > DWELL_STILL_RADIUS_PX) {
+      st.dwellAnchorX = cx;
+      st.dwellAnchorY = cy;
+      st.dwellStartMs = now;
+      st.dwellProgress = 0;
+      if (now < st.dwellRearmUntil && distFromAnchor > DWELL_STILL_RADIUS_PX * 1.8) {
+        st.dwellRearmUntil = 0;
+      }
+      return;
+    }
+
+    if (now < st.dwellRearmUntil) {
+      st.dwellProgress = 0;
+      st.dwellStartMs = now;
+      return;
+    }
+
+    if (st.dwellStartMs === 0) {
+      st.dwellStartMs = now;
+      st.dwellAnchorX = cx;
+      st.dwellAnchorY = cy;
+      return;
+    }
+
+    const elapsed = now - st.dwellStartMs;
+    st.dwellProgress = Math.min(1, elapsed / DWELL_LOCK_MS);
+
+    if (st.dwellProgress >= 1) {
+      st.startX = cx;
+      st.startY = cy;
+      st.moved = false;
+      st.dwellAnchorX = cx;
+      st.dwellAnchorY = cy;
+      st.dwellStartMs = now;
+      st.releaseProgress = 0;
+
+      if (hit.kind === 'click') {
+        st.dwellRearmUntil = now + DWELL_REARM_MS;
+        this._resetDwell(st);
+        this._spawnRipple(cx, cy, '#ff4f86');
+        hit.el.click();
+      } else if (hit.kind === 'canvas' && step === 'play') {
+        const grabbed = this.hooks.onPlayGrabStart(st.slot, cx, cy);
+        if (grabbed) {
+          st.mode = 'play-grab';
+          st.targetEl = hit.el;
+          this._spawnRipple(cx, cy, '#ff4f86');
+        } else {
+          st.dwellRearmUntil = now + 350;
+          this._resetDwell(st);
+        }
+      } else if (hit.kind === 'canvas' && step === 'paint') {
+        st.mode = 'paint';
+        st.targetEl = hit.el;
+        this.hooks.onPaintStart(cx, cy);
+        this._spawnRipple(cx, cy, '#ff6b9b');
+      } else if (hit.kind === 'slider') {
+        st.mode = 'slider';
+        st.targetEl = hit.el;
+        this._scrubSlider(hit.el, cx);
+        this._spawnRipple(cx, cy, '#ff4f86');
+      } else if (hit.kind === 'scroll') {
+        st.mode = 'scroll';
+        st.targetEl = hit.el;
+        st.scrollStartTop = hit.el.scrollTop;
+      }
+    }
+  }
+
   update(now, cursors) {
     if (!this.enabled) {
       this.resetAll();
@@ -212,6 +359,8 @@ export class AirCursorController {
       if (!hc) {
         if (st.mode !== 'idle') {
           this._endSlot(st, now, st.lastX, st.lastY, false);
+        } else {
+          this._resetDwell(st);
         }
         continue;
       }
@@ -220,10 +369,10 @@ export class AirCursorController {
       const cy = hc.y * this.cssH;
       st.lastX = cx;
       st.lastY = cy;
+      st.inputMode = hc.mode === 'dwell' ? 'dwell' : 'pinch';
 
       const hit = this._hitTest(cx, cy);
 
-      // Hover state (primary hand slot 0 drives UI hover & Paint brush cursor preview)
       if (s === 0) {
         if (hit.kind === 'click' || hit.kind === 'slider') {
           hoveredCandidate = hit.el;
@@ -233,16 +382,22 @@ export class AirCursorController {
         }
       }
 
-      // ---- STATE TRANSITIONS ----
+      // ---- FAST FLOW DWELL-LOCK MODE ----
+      if (st.inputMode === 'dwell') {
+        if (s === 0) {
+          this._updateDwellSlot(st, now, cx, cy, hit, step);
+        }
+        continue;
+      }
+
+      // ---- AI HANDS PINCH MODE ----
       if (hc.pinching) {
         if (st.mode === 'idle') {
-          // Rising edge of Pinch = Long-press / Pointer Down!
           st.startX = cx;
           st.startY = cy;
           st.moved = false;
 
           if (hit.kind === 'canvas' && step === 'play') {
-            // Both hands can grab & pull cheeks simultaneously!
             const grabbed = this.hooks.onPlayGrabStart(s, cx, cy);
             if (grabbed) {
               st.mode = 'play-grab';
@@ -267,7 +422,6 @@ export class AirCursorController {
             st.scrollStartTop = hit.el.scrollTop;
           }
         } else {
-          // Sustained Pinch = Long-press Drag!
           if (!st.moved && Math.hypot(cx - st.startX, cy - st.startY) > DRAG_DEADZONE_PX) {
             st.moved = true;
           }
@@ -282,7 +436,6 @@ export class AirCursorController {
           }
         }
       } else if (st.mode !== 'idle') {
-        // Falling edge of Pinch = Release!
         this._endSlot(st, now, cx, cy, true);
       }
     }
@@ -308,7 +461,6 @@ export class AirCursorController {
     ctx.clearRect(0, 0, this.cssW, this.cssH);
     this._hasDrawn = true;
 
-    // 1. Render expanding click / grab ripples
     for (let i = this._ripples.length - 1; i >= 0; i--) {
       const rp = this._ripples[i];
       rp.r += 1.9;
@@ -327,7 +479,6 @@ export class AirCursorController {
       ctx.restore();
     }
 
-    // 2. Render each active Air Cursor + elastic pull tether + pinch-closeness arc
     const twoHands = Boolean(bySlot[0] && bySlot[1]);
     for (let s = 0; s < 2; s++) {
       const hc = bySlot[s];
@@ -335,10 +486,13 @@ export class AirCursorController {
       const st = this._slots[s];
       const x = hc.x * this.cssW;
       const y = hc.y * this.cssH;
-      const prog = Math.max(0, Math.min(1, hc.pinchProgress || 0));
-      const pinching = hc.pinching;
 
-      // Elastic tether line while long-press pulling a cheek on Play canvas!
+      const isDwell = st.inputMode === 'dwell';
+      const locked = isDwell ? st.mode !== 'idle' : Boolean(hc.pinching);
+      const prog = isDwell ? st.dwellProgress : Math.max(0, Math.min(1, hc.pinchProgress || 0));
+      const relProg = isDwell ? st.releaseProgress : 0;
+
+      // Elastic dashed pull tether while pulling a cheek!
       if (st.mode === 'play-grab') {
         const dist = Math.hypot(x - st.startX, y - st.startY);
         if (dist > 6) {
@@ -353,7 +507,6 @@ export class AirCursorController {
           ctx.stroke();
           ctx.setLineDash([]);
 
-          // Anchor origin dot
           ctx.beginPath();
           ctx.arc(st.startX, st.startY, 4.5, 0, Math.PI * 2);
           ctx.fillStyle = 'rgba(255, 79, 134, 0.72)';
@@ -362,35 +515,41 @@ export class AirCursorController {
         }
       }
 
-      // Outer ring contracts smoothly as thumb & index approach pinch
-      const outerR = pinching ? 13 : (20 - prog * 6);
+      const outerR = locked ? 13.5 : (20 - prog * 5.5);
       ctx.save();
 
-      // Soft drop shadow glow
-      ctx.shadowColor = pinching ? 'rgba(255, 79, 134, 0.45)' : 'rgba(242, 132, 164, 0.30)';
-      ctx.shadowBlur = pinching ? 14 : 8;
+      ctx.shadowColor = locked ? 'rgba(255, 79, 134, 0.45)' : 'rgba(242, 132, 164, 0.30)';
+      ctx.shadowBlur = locked ? 14 : 8;
 
-      // Translucent halo fill
       ctx.beginPath();
       ctx.arc(x, y, outerR, 0, Math.PI * 2);
-      ctx.fillStyle = pinching
+      ctx.fillStyle = locked
         ? 'rgba(255, 79, 134, 0.30)'
         : (st.mode === 'idle' && s === 0 && this._hoveredEl
           ? 'rgba(242, 132, 164, 0.24)'
           : 'rgba(255, 255, 255, 0.22)');
       ctx.fill();
 
-      // Crisp base ring
-      ctx.lineWidth = pinching ? 2.8 : 1.8;
-      ctx.strokeStyle = pinching ? '#ff4f86' : 'rgba(235, 107, 146, 0.72)';
+      ctx.lineWidth = locked ? 2.8 : 1.8;
+      ctx.strokeStyle = locked ? '#ff4f86' : 'rgba(235, 107, 146, 0.72)';
       ctx.stroke();
 
-      // Tactile Pinch-Closeness Progress Arc (fills up to 360° right before pinch locks!)
-      if (!pinching && prog > 0.08) {
+      // Pinch-closeness or Dwell-lock progress arc (pink, fills clockwise)
+      if (!locked && prog > 0.06) {
         ctx.beginPath();
-        ctx.arc(x, y, outerR + 3, -Math.PI * 0.5, -Math.PI * 0.5 + prog * Math.PI * 2);
+        ctx.arc(x, y, outerR + 3.2, -Math.PI * 0.5, -Math.PI * 0.5 + prog * Math.PI * 2);
         ctx.strokeStyle = '#ff4f86';
-        ctx.lineWidth = 2.6;
+        ctx.lineWidth = 2.8;
+        ctx.lineCap = 'round';
+        ctx.stroke();
+      }
+
+      // Fast Flow Dwell-Release countdown arc (crisp mint/white, fills when holding still to release!)
+      if (locked && relProg > 0.04) {
+        ctx.beginPath();
+        ctx.arc(x, y, outerR + 4.2, -Math.PI * 0.5, -Math.PI * 0.5 + relProg * Math.PI * 2);
+        ctx.strokeStyle = '#38d9a9';
+        ctx.lineWidth = 3.0;
         ctx.lineCap = 'round';
         ctx.stroke();
       }
@@ -398,14 +557,13 @@ export class AirCursorController {
       // Center precision dot
       ctx.shadowBlur = 0;
       ctx.beginPath();
-      ctx.arc(x, y, pinching ? 5.2 : 3.4, 0, Math.PI * 2);
-      ctx.fillStyle = pinching ? '#ff4f86' : '#ffffff';
+      ctx.arc(x, y, locked ? 5.2 : 3.4, 0, Math.PI * 2);
+      ctx.fillStyle = locked ? '#ff4f86' : '#ffffff';
       ctx.fill();
       ctx.lineWidth = 1.6;
       ctx.strokeStyle = '#ff4f86';
       ctx.stroke();
 
-      // Hand number pill when both hands are on screen
       if (twoHands) {
         ctx.font = '800 10px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'center';
